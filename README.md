@@ -1,74 +1,94 @@
 # Oura MCP Server
 
-Servidor MCP portable para Oura Ring.
+Servidor MCP para Oura Ring, **portable** y **multi-usuario**.
 
-Funciona con **cualquier agente/cliente MCP**: Claude Desktop, Cursor,
-VS Code, Claude Code CLI, y cualquier otro que soporte el protocolo MCP.
+Funciona con **cualquier agente/cliente MCP** (Claude Desktop, Cursor, VS Code,
+Claude Code CLI) tanto en local (stdio) como remoto (HTTP, una cuenta Oura por
+persona).
 
-## Modos de uso
+## Modos de transporte
 
-### 1) MCP stdio (por defecto - recomendado)
+### 1) stdio (local, por defecto)
 
 ```bash
 python -m oura_mcp_server
 ```
 
-Conectalo desde cualquier cliente MCP apuntando a:
-```bash
-python -m oura_mcp_server
-```
+Un solo usuario. Usa `OURA_BEARER_TOKEN` o el `DEFAULT_USER_ID`.
 
-### 2) HTTP / FastAPI
-Para OAuth callback, webhooks y healthcheck:
+### 2) HTTP (remoto, multi-usuario)
 
 ```bash
 python -m oura_mcp_server --transport http
 ```
 
-## Autenticacion
+Expone el **protocolo MCP en `/mcp`** con autenticación Bearer, más las rutas de
+OAuth y webhooks en el mismo puerto. Pensado para hospedarse (ver
+[`../scaleflow-mcp-host`](../scaleflow-mcp-host)).
 
-### Modo OAuth2 (produccion)
-1. Registra una app en https://cloud.ouraring.com/oauth/applications
-2. Configura `OURA_CLIENT_ID` y `OURA_CLIENT_SECRET` en `.env`
-3. Corre el servidor en modo HTTP: `python -m oura_mcp_server --transport http`
-4. Visita `http://localhost:8000/auth/login`
-5. Autoriza la app en Oura
-6. Listo. Los tokens se refrescan automaticamente.
+Endpoints HTTP: `GET /mcp` (MCP), `GET /health`, `GET /auth/login?key=<api-key>`,
+`GET /auth/callback`, `GET|POST /webhooks/oura`.
 
-### Modo token directo (solo dev)
-Si no quieres configurar OAuth2 completo:
-1. Genera un access token desde el dashboard de Oura (developer tools)
-2. Ponlo en `OURA_BEARER_TOKEN` en `.env`
-3. Corre el servidor: `python -m oura_mcp_server`
+## Autenticación
 
-⚠️ El token directo expira a los 30 dias. No apto para produccion.
+### Multi-usuario (producción, transporte HTTP)
 
-## Herramientas MCP
+Dos identidades trabajan juntas:
 
-| Herramienta | Descripcion |
-|---|---|
-| `whoami` | Perfil del usuario conectado |
-| `sleep_summary` | Resumen de sueno por dia |
-| `activity_summary` | Resumen de actividad por dia |
-| `health_snapshot` | Snapshot completo salud + sueno + actividad |
-| `list_webhook_subscriptions` | Lista webhooks activos |
-| `create_webhook_subscription` | Crea un webhook |
-| `renew_webhook_subscription` | Renueva un webhook |
-| `delete_webhook_subscription` | Elimina un webhook |
+1. **Identidad del agente** — cada agente/cliente se conecta al MCP con
+   `Authorization: Bearer <api-key>`. Las keys se definen en `config/tenants.yaml`
+   (ver `config/tenants.example.yaml`); cada key mapea a una persona (`user`).
+2. **Cuenta Oura de la persona** — cada miembro conecta SU propio anillo con un
+   **link personalizado de un solo clic**:
 
-## Setup rapido
+   ```
+   https://oura.scaleflow.tech/auth/login?key=<su-api-key>
+   ```
+
+   Hace clic → consiente en Oura → los tokens se guardan server-side bajo su
+   `user` y se refrescan solos. Nunca pega tokens a mano. El `state` de OAuth va
+   firmado (HMAC) para asociar el callback a la persona correcta.
+
+Requiere en `.env`: `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, `OURA_STATE_SECRET`,
+`OURA_REDIRECT_URI` (la URL pública registrada en la app de Oura) y
+`TENANTS_CONFIG_PATH`.
+
+### Token directo (solo dev / un usuario)
+
+Pon `OURA_BEARER_TOKEN` en `.env`. ⚠️ Expira a los 30 días; no apto para producción.
+
+## Herramientas MCP (cobertura completa de la API v2)
+
+**Resúmenes diarios:** `sleep_summary`, `readiness_summary`, `activity_summary`,
+`spo2_summary`, `stress_summary`, `resilience_summary`, `cardiovascular_age`.
+**Detalle / periodos:** `sleep_periods` (fases, HR, HRV), `sleep_time`, `workouts`,
+`sessions`, `rest_mode_periods`, `vo2_max`.
+**Serie temporal:** `heartrate` (usa `start_datetime`/`end_datetime`).
+**Perfil y config:** `whoami`, `ring_configuration`.
+**Etiquetas:** `enhanced_tags`, `tags` (legado).
+**Agregado:** `health_snapshot` (perfil + sueño + readiness + actividad + SpO2 +
+estrés + resiliencia en paralelo).
+**Webhooks:** `list/create/delete/renew_webhook_subscription`.
+**Prompt:** `daily_checkin`.
+
+## Setup rápido
 
 ```bash
-pip install -e .[dev]
-cp .env.example .env
-# edita .env con tus credenciales
-python -m oura_mcp_server
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env                       # edita credenciales
+cp config/tenants.example.yaml config/tenants.yaml   # solo para HTTP multi-usuario
+python -m oura_mcp_server                  # stdio
 ```
 
-## Validacion
+## Validación
 
 ```bash
-python -m compileall src tests
-pytest -v
+pytest -q
 python -m oura_mcp_server --help
 ```
+
+## Despliegue
+
+Como contenedor dentro del host multi-MCP de Scaleflow:
+[`../scaleflow-mcp-host/README.md`](../scaleflow-mcp-host/README.md).

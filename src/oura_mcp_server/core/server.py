@@ -3,82 +3,150 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.auth import TokenVerifier
 
-from oura_mcp_server.auth.oauth import OuraOAuth2Manager
+from oura_mcp_server.auth.identity import resolve_user_id
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.client.oura import OuraClient
 from oura_mcp_server.config import Settings
 
+# Registro de endpoints "daily"/periodo que aceptan rango de fechas (start_date/end_date).
+# (nombre_tool, path, descripcion)
+_RANGE_ENDPOINTS: list[tuple[str, str, str]] = [
+    ("sleep_summary", "/usercollection/daily_sleep",
+     "Resumen diario de sueno (score, contribuyentes) en un rango de fechas."),
+    ("readiness_summary", "/usercollection/daily_readiness",
+     "Resumen diario de readiness (disposicion) en un rango de fechas."),
+    ("activity_summary", "/usercollection/daily_activity",
+     "Resumen diario de actividad (pasos, calorias, MET) en un rango de fechas."),
+    ("spo2_summary", "/usercollection/daily_spo2",
+     "Saturacion de oxigeno (SpO2) promedio nocturna por dia."),
+    ("stress_summary", "/usercollection/daily_stress",
+     "Resumen diario de estres (tiempo en stress/recovery) por dia."),
+    ("resilience_summary", "/usercollection/daily_resilience",
+     "Resumen diario de resiliencia (nivel y contribuyentes) por dia."),
+    ("cardiovascular_age", "/usercollection/daily_cardiovascular_age",
+     "Edad cardiovascular estimada por dia."),
+    ("sleep_periods", "/usercollection/sleep",
+     "Periodos de sueno detallados: fases (REM/light/deep/awake), HR, HRV, latencia."),
+    ("sleep_time", "/usercollection/sleep_time",
+     "Recomendaciones de horario optimo de sueno por dia."),
+    ("workouts", "/usercollection/workout",
+     "Entrenamientos registrados (tipo, intensidad, calorias, distancia)."),
+    ("sessions", "/usercollection/session",
+     "Sesiones de momentos (meditacion, respiracion, descanso) con HR/HRV."),
+    ("rest_mode_periods", "/usercollection/rest_mode_period",
+     "Periodos de Rest Mode (modo descanso) activados por el usuario."),
+    ("vo2_max", "/usercollection/vO2_max",
+     "Mediciones de VO2 max (capacidad cardiorrespiratoria)."),
+    ("enhanced_tags", "/usercollection/enhanced_tag",
+     "Etiquetas mejoradas (enhanced tags) del usuario en un rango de fechas."),
+    ("tags", "/usercollection/tag",
+     "Etiquetas (tags) del usuario. Endpoint legado; preferir enhanced_tags."),
+]
 
-def _resolve_token(settings: Settings, store: TokenStore) -> str | None:
-    """Returns a valid access token: bearer_token > stored tokens > None."""
-    if settings.oura_bearer_token:
-        return settings.oura_bearer_token
-    tokens = store.get("default")
-    return tokens.access_token if tokens else None
 
+def create_mcp_server(
+    settings: Settings,
+    store: TokenStore,
+    auth: TokenVerifier | None = None,
+) -> FastMCP:
+    mcp = FastMCP(settings.mcp_name, auth=auth)
 
-def create_mcp_server(settings: Settings, store: TokenStore) -> FastMCP:
-    mcp = FastMCP(settings.mcp_name)
+    async def _fetch(path: str, params: dict[str, Any] | None = None) -> Any:
+        """Llama a la API de Oura con los tokens del caller actual.
 
-    def _ensure_token() -> str:
-        token = _resolve_token(settings, store)
-        if not token:
-            raise RuntimeError(
-                "No authentication configured. "
-                "Set OURA_BEARER_TOKEN (dev) or run OAuth2 flow."
-            )
-        return token
+        - Si hay OURA_BEARER_TOKEN (dev/un solo usuario), lo usa directamente.
+        - En otro caso resuelve el oura_user_id del Bearer del MCP y usa los
+          tokens OAuth guardados para esa persona (con refresh automatico).
+        """
+        if settings.oura_bearer_token:
+            return await OuraClient(settings, settings.oura_bearer_token).get_json(path, params)
+        user_id = resolve_user_id(settings)
+        try:
+            return await OuraClient.get_json_for_user(user_id, path, settings, store, params)
+        except ValueError as exc:
+            if str(exc).startswith("user_not_connected"):
+                raise RuntimeError(
+                    f"El usuario '{user_id}' no ha conectado su cuenta Oura. "
+                    f"Abre {settings.oura_redirect_uri.rsplit('/auth/callback', 1)[0]}"
+                    f"/auth/login con tu API key para autorizar el acceso."
+                ) from exc
+            raise
 
-    def _client() -> OuraClient:
-        return OuraClient(settings, _ensure_token())
+    # --- Tools generados desde el registro (rango de fechas) ---
+    def _make_range_tool(path: str):
+        async def _tool(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+            params = {k: v for k, v in {"start_date": start_date, "end_date": end_date}.items() if v}
+            return await _fetch(path, params)
+        return _tool
 
+    for name, path, description in _RANGE_ENDPOINTS:
+        fn = _make_range_tool(path)
+        fn.__name__ = name
+        mcp.tool(name=name, description=description)(fn)
+
+    # --- Tools con firma propia ---
     @mcp.tool()
     async def whoami() -> dict[str, Any]:
-        """Obtiene el perfil del usuario Oura conectado."""
-        return await _client().get_json("/usercollection/personal_info")
+        """Perfil del usuario Oura conectado (edad, sexo, peso, altura, email)."""
+        return await _fetch("/usercollection/personal_info")
 
     @mcp.tool()
-    async def sleep_summary(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
-        """Resumen de sueno en un rango de fechas."""
-        params = {k: v for k, v in {"start_date": start_date, "end_date": end_date}.items() if v}
-        return await _client().get_json("/usercollection/daily_sleep", params)
+    async def heartrate(
+        start_datetime: str | None = None, end_datetime: str | None = None
+    ) -> dict[str, Any]:
+        """Frecuencia cardiaca (serie temporal). Usa start_datetime/end_datetime en
+        formato ISO 8601 (p.ej. 2026-06-20T00:00:00+00:00), no fechas simples."""
+        params = {
+            k: v
+            for k, v in {"start_datetime": start_datetime, "end_datetime": end_datetime}.items()
+            if v
+        }
+        return await _fetch("/usercollection/heartrate", params)
 
     @mcp.tool()
-    async def readiness_summary(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
-        """Resumen de readiness en un rango de fechas."""
-        params = {k: v for k, v in {"start_date": start_date, "end_date": end_date}.items() if v}
-        return await _client().get_json("/usercollection/daily_readiness", params)
+    async def ring_configuration() -> dict[str, Any]:
+        """Configuracion del anillo (modelo, color, tamano, firmware)."""
+        return await _fetch("/usercollection/ring_configuration")
 
     @mcp.tool()
-    async def activity_summary(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
-        """Resumen de actividad en un rango de fechas."""
+    async def health_snapshot(
+        start_date: str | None = None, end_date: str | None = None
+    ) -> dict[str, Any]:
+        """Snapshot completo en paralelo: perfil + sueno + readiness + actividad +
+        SpO2 + estres + resiliencia, para el rango indicado."""
         params = {k: v for k, v in {"start_date": start_date, "end_date": end_date}.items() if v}
-        return await _client().get_json("/usercollection/daily_activity", params)
-
-    @mcp.tool()
-    async def health_snapshot(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
-        """Snapshot completo: perfil + sueno + readiness + actividad."""
-        params = {k: v for k, v in {"start_date": start_date, "end_date": end_date}.items() if v}
-        c = _client()
-        profile, sleep, readiness, activity = await asyncio.gather(
-            c.get_json("/usercollection/personal_info"),
-            c.get_json("/usercollection/daily_sleep", params),
-            c.get_json("/usercollection/daily_readiness", params),
-            c.get_json("/usercollection/daily_activity", params),
+        (
+            profile, sleep, readiness, activity, spo2, stress, resilience
+        ) = await asyncio.gather(
+            _fetch("/usercollection/personal_info"),
+            _fetch("/usercollection/daily_sleep", params),
+            _fetch("/usercollection/daily_readiness", params),
+            _fetch("/usercollection/daily_activity", params),
+            _fetch("/usercollection/daily_spo2", params),
+            _fetch("/usercollection/daily_stress", params),
+            _fetch("/usercollection/daily_resilience", params),
         )
         return {
             "profile": profile,
             "daily_sleep": sleep,
             "daily_readiness": readiness,
             "daily_activity": activity,
+            "daily_spo2": spo2,
+            "daily_stress": stress,
+            "daily_resilience": resilience,
         }
+
+    # --- Webhooks (usan credenciales OAuth de cliente, no tokens de usuario) ---
+    def _webhook_client() -> OuraClient:
+        return OuraClient(settings, settings.oura_bearer_token or "")
 
     @mcp.tool()
     async def list_webhook_subscriptions() -> list[dict]:
-        """Lista las suscripciones a webhooks de Oura."""
-        return await _client().list_webhooks()
+        """Lista las suscripciones a webhooks de Oura (nivel de aplicacion)."""
+        return await _webhook_client().list_webhooks()
 
     @mcp.tool()
     async def create_webhook_subscription(
@@ -88,24 +156,26 @@ def create_mcp_server(settings: Settings, store: TokenStore) -> FastMCP:
         data_type: str = "daily_sleep",
     ) -> dict:
         """Crea una suscripcion a webhook de Oura."""
-        return await _client().create_webhook(callback_url, verification_token, event_type, data_type)
+        return await _webhook_client().create_webhook(
+            callback_url, verification_token, event_type, data_type
+        )
 
     @mcp.tool()
     async def delete_webhook_subscription(subscription_id: str) -> dict:
         """Elimina una suscripcion a webhook."""
-        await _client().delete_webhook(subscription_id)
+        await _webhook_client().delete_webhook(subscription_id)
         return {"ok": True}
 
     @mcp.tool()
     async def renew_webhook_subscription(subscription_id: str) -> dict:
         """Renueva una suscripcion a webhook."""
-        return await _client().renew_webhook(subscription_id)
+        return await _webhook_client().renew_webhook(subscription_id)
 
     @mcp.prompt()
     def daily_checkin() -> str:
         return (
             "Resume mi estado de salud de hoy basandote en los datos de Oura: "
-            "sueno, readiness, actividad, y cualquier anomalia relevante."
+            "sueno, readiness, actividad, SpO2, estres y cualquier anomalia relevante."
         )
 
     return mcp

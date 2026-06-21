@@ -1,0 +1,20 @@
+# Copia este archivo a config/tenants.yaml y ajusta las claves.
+# Cada API key identifica a una persona; `user` es la clave bajo la cual se
+# guardan sus tokens OAuth de Oura. Cada miembro conecta SU propio anillo.
+#
+# El agente MCP se autentica con: Authorization: Bearer <key>
+# La persona conecta su cuenta abriendo: /auth/login?key=<key>
+
+admin_key: "sk-admin-oura-CHANGE-ME"
+default_tenant: "scaleflow"
+
+tenants:
+  scaleflow:
+    name: "Scaleflow Internal"
+    api_keys:
+      - key: "sk-oura-kike-CHANGE-ME"
+        agent: "claude-code"
+        user: "kike"
+      - key: "sk-oura-amber-CHANGE-ME"
+        agent: "openclaw-amber"
+        user: "amber"

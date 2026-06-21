@@ -20,9 +20,10 @@ class Settings(BaseSettings):
     oura_client_id: str | None = None
     oura_client_secret: str | None = None
     oura_redirect_uri: str = "http://127.0.0.1:8000/auth/callback"
-    oura_scopes: str = "email personal daily"
+    # Scopes que cubren toda la informacion disponible de la API v2 de Oura.
+    oura_scopes: str = "email personal daily heartrate workout tag session spo2Daily"
 
-    # Dev fallback
+    # Dev fallback (un solo usuario; ignora multi-tenant)
     oura_bearer_token: str | None = None
 
     # Storage
@@ -37,6 +38,14 @@ class Settings(BaseSettings):
 
     # MCP
     mcp_name: str = "oura-mcp-server"
+
+    # Multi-tenant / identidad (transporte http)
+    tenants_config_path: str = "./config/tenants.yaml"
+    default_tenant_id: str = "default"
+    # user_id usado cuando no hay autenticacion (stdio o bearer dev)
+    default_user_id: str = "default"
+    # Secreto para firmar el parametro `state` del flujo OAuth.
+    oura_state_secret: str | None = None
 
 
 @lru_cache(maxsize=1)
