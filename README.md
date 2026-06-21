@@ -1,70 +1,74 @@
 # Oura MCP Server
 
-Base inicial de un servidor MCP para integrar Oura Ring.
+Servidor MCP portable para Oura Ring.
 
-## Fase 2
-- Persistencia SQLite de tokens
-- Refresh automático de tokens
-- Health snapshot unificado
-- Administración básica de webhooks
+Funciona con **cualquier agente/cliente MCP**: Claude Desktop, Cursor,
+VS Code, Claude Code CLI, y cualquier otro que soporte el protocolo MCP.
 
-## Qué incluye
-- OAuth2 server-side para Oura
-- Healthcheck HTTP
-- Webhook endpoint base
-- Tools MCP para perfil y resúmenes diarios
-- Tools MCP para webhooks
+## Modos de uso
 
-## Setup
+### 1) MCP stdio (por defecto - recomendado)
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
+python -m oura_mcp_server
+```
+
+Conectalo desde cualquier cliente MCP apuntando a:
+```bash
+python -m oura_mcp_server
+```
+
+### 2) HTTP / FastAPI
+Para OAuth callback, webhooks y healthcheck:
+
+```bash
+python -m oura_mcp_server --transport http
+```
+
+## Autenticacion
+
+### Modo OAuth2 (produccion)
+1. Registra una app en https://cloud.ouraring.com/oauth/applications
+2. Configura `OURA_CLIENT_ID` y `OURA_CLIENT_SECRET` en `.env`
+3. Corre el servidor en modo HTTP: `python -m oura_mcp_server --transport http`
+4. Visita `http://localhost:8000/auth/login`
+5. Autoriza la app en Oura
+6. Listo. Los tokens se refrescan automaticamente.
+
+### Modo token directo (solo dev)
+Si no quieres configurar OAuth2 completo:
+1. Genera un access token desde el dashboard de Oura (developer tools)
+2. Ponlo en `OURA_BEARER_TOKEN` en `.env`
+3. Corre el servidor: `python -m oura_mcp_server`
+
+⚠️ El token directo expira a los 30 dias. No apto para produccion.
+
+## Herramientas MCP
+
+| Herramienta | Descripcion |
+|---|---|
+| `whoami` | Perfil del usuario conectado |
+| `sleep_summary` | Resumen de sueno por dia |
+| `activity_summary` | Resumen de actividad por dia |
+| `health_snapshot` | Snapshot completo salud + sueno + actividad |
+| `list_webhook_subscriptions` | Lista webhooks activos |
+| `create_webhook_subscription` | Crea un webhook |
+| `renew_webhook_subscription` | Renueva un webhook |
+| `delete_webhook_subscription` | Elimina un webhook |
+
+## Setup rapido
+
+```bash
 pip install -e .[dev]
 cp .env.example .env
+# edita .env con tus credenciales
+python -m oura_mcp_server
 ```
 
-## Variables de entorno
-- `OURA_CLIENT_ID`
-- `OURA_CLIENT_SECRET`
-- `OURA_REDIRECT_URI`
-- `OURA_WEBHOOK_VERIFICATION_TOKEN`
-- `OURA_SCOPES`
-- `OURA_TOKEN_DB_PATH`
-
-## Correr API
+## Validacion
 
 ```bash
-uvicorn app.main:app --reload --port 8000
+python -m compileall src tests
+pytest -v
+python -m oura_mcp_server --help
 ```
-
-## Correr MCP
-
-```bash
-python -m app.mcp_server
-```
-
-## Pruebas
-
-```bash
-pytest -q
-```
-
-## Flujo
-1. Llamar `GET /oauth/start?user_id=...`
-2. Autorizar en Oura
-3. Recibir `GET /oauth/callback`
-4. Usar los tools MCP para consultar perfil, métricas y snapshot
-
-## Endpoints útiles
-- `GET /tokens/users`
-- `GET /webhooks/oura/subscriptions`
-- `POST /webhooks/oura/subscriptions`
-- `DELETE /webhooks/oura/subscriptions/{id}`
-- `PUT /webhooks/oura/subscriptions/{id}/renew`
-
-## Siguientes pasos
-- Manejo de errores 401/403/429 más fino
-- Reintentos y backoff
-- Normalización de respuestas Oura
-- Persistir eventos de webhook para re-sync

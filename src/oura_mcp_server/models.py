@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
@@ -23,19 +25,9 @@ class OAuthTokens(BaseModel):
         return datetime.now(timezone.utc) >= (expires_at - timedelta(seconds=skew_seconds))
 
 
-class ConnectAccountResponse(BaseModel):
-    authorization_url: str
-    state: str
-
-
-class HealthResponse(BaseModel):
-    status: str = "ok"
-    service: str = "oura-mcp-server"
-
-
 class HealthSnapshot(BaseModel):
-    user_id: str
-    profile: dict
-    daily_sleep: dict
-    daily_readiness: dict
-    daily_activity: dict
+    user_id: str = ""
+    profile: dict = Field(default_factory=dict)
+    daily_sleep: dict = Field(default_factory=dict)
+    daily_readiness: dict = Field(default_factory=dict)
+    daily_activity: dict = Field(default_factory=dict)
