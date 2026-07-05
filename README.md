@@ -63,6 +63,9 @@ Pon `OURA_BEARER_TOKEN` en `.env`. ⚠️ Expira a los 30 días; no apto para pr
 `spo2_summary`, `stress_summary`, `resilience_summary`, `cardiovascular_age`.
 **Detalle / periodos:** `sleep_periods` (fases, HR, HRV), `sleep_time`, `workouts`,
 `sessions`, `rest_mode_periods`, `vo2_max`.
+**Sueño de la última noche:** `sleep_last_night` — sin argumentos elige el sueño
+principal de la noche que terminó hoy (fallback al más reciente); cruza métricas
+fisiológicas + score y devuelve resumen curado + JSON crudo. Admite `day` (YYYY-MM-DD).
 **Serie temporal:** `heartrate` (usa `start_datetime`/`end_datetime`).
 **Perfil y config:** `whoami`, `ring_configuration`.
 **Etiquetas:** `enhanced_tags`, `tags` (legado).

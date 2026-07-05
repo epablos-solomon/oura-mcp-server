@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, timedelta
 from typing import Any
 
 from fastmcp import FastMCP
@@ -45,6 +46,15 @@ _RANGE_ENDPOINTS: list[tuple[str, str, str]] = [
     ("tags", "/usercollection/tag",
      "Etiquetas (tags) del usuario. Endpoint legado; preferir enhanced_tags."),
 ]
+
+
+def _fmt_duration(seconds: int | float | None) -> str | None:
+    """Convierte una duracion en segundos a texto legible (p.ej. '7h 12m', '38m')."""
+    if seconds is None:
+        return None
+    total = int(seconds)
+    hours, minutes = total // 3600, (total % 3600) // 60
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
 
 
 def create_mcp_server(
@@ -105,6 +115,82 @@ def create_mcp_server(
             if v
         }
         return await _fetch("/usercollection/heartrate", params)
+
+    @mcp.tool()
+    async def sleep_last_night(day: str | None = None) -> dict[str, Any]:
+        """Estadisticas detalladas del sueno principal de la noche que me levante.
+        Sin argumentos usa el dia de hoy como dia de despertar; si aun no hay datos,
+        cae al periodo de sueno mas reciente disponible. Pasa 'day' (YYYY-MM-DD) para
+        una noche concreta. Devuelve un resumen curado (duracion, eficiencia, latencia,
+        fases, HR, HRV, frecuencia respiratoria, score y contribuyentes) mas el JSON
+        crudo del periodo y del daily_sleep."""
+        target = date.fromisoformat(day) if day else date.today()
+        # Ventana amplia para permitir fallback al periodo mas reciente <= target.
+        # end_date con +1 dia porque el filtro de Oura puede excluir el borde superior.
+        params = {
+            "start_date": (target - timedelta(days=6)).isoformat(),
+            "end_date": (target + timedelta(days=1)).isoformat(),
+        }
+        periods = (await _fetch("/usercollection/sleep", params)).get("data", [])
+        target_iso = target.isoformat()
+        # Preferir sueno principal; caer a cualquier periodo tipo "sleep" si no hay long_sleep.
+        mains = [
+            p for p in periods
+            if p.get("type") == "long_sleep" and (p.get("day") or "") <= target_iso
+        ]
+        if not mains:
+            mains = [
+                p for p in periods
+                if p.get("type") in ("long_sleep", "sleep") and (p.get("day") or "") <= target_iso
+            ]
+        if not mains:
+            return {
+                "message": f"Sin datos de sueno principal para {target_iso} ni dias previos.",
+                "day": target_iso,
+            }
+        # Mas reciente por 'day', desempate por mayor duracion total.
+        period = max(
+            mains,
+            key=lambda p: (p.get("day") or "", p.get("total_sleep_duration") or 0),
+        )
+        sleep_day = period["day"]
+
+        # Score + contribuyentes de ese dia (endpoint distinto).
+        ds = await _fetch(
+            "/usercollection/daily_sleep",
+            {
+                "start_date": sleep_day,
+                "end_date": (date.fromisoformat(sleep_day) + timedelta(days=1)).isoformat(),
+            },
+        )
+        daily = next((d for d in ds.get("data", []) if d.get("day") == sleep_day), None)
+
+        summary = {
+            "day": sleep_day,
+            "type": period.get("type"),
+            "bedtime_start": period.get("bedtime_start"),
+            "bedtime_end": period.get("bedtime_end"),
+            "sleep_score": (daily or {}).get("score"),
+            "total_sleep": _fmt_duration(period.get("total_sleep_duration")),
+            "time_in_bed": _fmt_duration(period.get("time_in_bed")),
+            "efficiency": period.get("efficiency"),
+            "latency": _fmt_duration(period.get("latency")),
+            "restless_periods": period.get("restless_periods"),
+            "phases": {
+                "deep": _fmt_duration(period.get("deep_sleep_duration")),
+                "rem": _fmt_duration(period.get("rem_sleep_duration")),
+                "light": _fmt_duration(period.get("light_sleep_duration")),
+                "awake": _fmt_duration(period.get("awake_time")),
+            },
+            "hr": {
+                "avg": period.get("average_heart_rate"),
+                "lowest": period.get("lowest_heart_rate"),
+            },
+            "hrv_avg": period.get("average_hrv"),
+            "respiratory_rate": period.get("average_breath"),
+            "score_contributors": (daily or {}).get("contributors"),
+        }
+        return {"summary": summary, "raw": {"sleep_period": period, "daily_sleep": daily}}
 
     @mcp.tool()
     async def ring_configuration() -> dict[str, Any]:
