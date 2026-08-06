@@ -7,6 +7,7 @@ import httpx
 from oura_mcp_server.config import Settings
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.auth.oauth import OuraOAuth2Manager
+from oura_mcp_server.models import OAuthTokens
 
 
 class OuraClient:
@@ -29,14 +30,23 @@ class OuraClient:
         return await self._get(path, params)
 
     async def refresh_and_retry(
-        self, path: str, tokens, store: TokenStore, params: dict[str, Any] | None = None
+        self,
+        path: str,
+        user_id: str,
+        tokens: OAuthTokens,
+        store: TokenStore,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if tokens.refresh_token:
-            new_tokens = await self._oauth.refresh(tokens.refresh_token)
-            store.save(tokens.user_id or "default", new_tokens)
-            self.access_token = new_tokens.access_token
-            return await self._get(path, params)
-        raise
+        """Renueva los tokens de `user_id`, los persiste y reintenta la peticion.
+
+        El user_id llega como argumento: los OAuthTokens no saben de quien son.
+        """
+        if not tokens.refresh_token:
+            raise ValueError(f"no_refresh_token: {user_id}")
+        new_tokens = await self._oauth.refresh(tokens.refresh_token)
+        store.save(user_id, new_tokens)
+        self.access_token = new_tokens.access_token
+        return await self._get(path, params)
 
     @classmethod
     async def get_json_for_user(
@@ -54,14 +64,14 @@ class OuraClient:
         client = cls(settings, tokens.access_token)
 
         if tokens.is_expired() and tokens.refresh_token:
-            return await client.refresh_and_retry(path, tokens, store, params)
+            return await client.refresh_and_retry(path, user_id, tokens, store, params)
 
         try:
             return await client._get(path, params)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 401 or not tokens.refresh_token:
                 raise
-            return await client.refresh_and_retry(path, tokens, store, params)
+            return await client.refresh_and_retry(path, user_id, tokens, store, params)
 
     def _webhook_headers(self) -> dict[str, str]:
         return {
