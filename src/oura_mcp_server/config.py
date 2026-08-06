@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     default_user_id: str = "default"
     # Secreto para firmar el parametro `state` del flujo OAuth.
     oura_state_secret: str | None = None
+    # Token de verificacion de los webhooks: el mismo que se registra al crear
+    # la suscripcion. Sin el, /webhooks/oura falla cerrado (503).
+    oura_webhook_verification_token: str | None = None
 
 
 @lru_cache(maxsize=1)

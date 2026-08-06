@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date, timedelta
 from typing import Any
 
@@ -11,6 +12,8 @@ from oura_mcp_server.auth.identity import resolve_user_id
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.client.oura import OuraClient
 from oura_mcp_server.config import Settings
+
+logger = logging.getLogger(__name__)
 
 # Registro de endpoints "daily"/periodo que aceptan rango de fechas (start_date/end_date).
 # (nombre_tool, path, descripcion)
@@ -64,14 +67,25 @@ def create_mcp_server(
 ) -> FastMCP:
     mcp = FastMCP(settings.mcp_name, auth=auth)
 
+    # OURA_BEARER_TOKEN es un atajo de un solo usuario. Recibir un `auth` es la
+    # senal de que este servidor es multiusuario (lo monta build_http_server):
+    # ahi el atajo serviria los datos de salud de esa persona a cualquiera con
+    # una API key valida, asi que se ignora.
+    bearer_global_permitido = auth is None
+    if settings.oura_bearer_token and not bearer_global_permitido:
+        logger.warning(
+            "OURA_BEARER_TOKEN esta configurado pero se ignora: este transporte es "
+            "multiusuario y cada persona usa sus propios tokens OAuth."
+        )
+
     async def _fetch(path: str, params: dict[str, Any] | None = None) -> Any:
         """Llama a la API de Oura con los tokens del caller actual.
 
-        - Si hay OURA_BEARER_TOKEN (dev/un solo usuario), lo usa directamente.
+        - Sin auth (stdio, un solo usuario) y con OURA_BEARER_TOKEN, lo usa.
         - En otro caso resuelve el oura_user_id del Bearer del MCP y usa los
           tokens OAuth guardados para esa persona (con refresh automatico).
         """
-        if settings.oura_bearer_token:
+        if bearer_global_permitido and settings.oura_bearer_token:
             return await OuraClient(settings, settings.oura_bearer_token).get_json(path, params)
         user_id = resolve_user_id(settings)
         try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from threading import Lock
 
@@ -21,7 +22,7 @@ class TokenStore:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS oauth_tokens (
@@ -35,7 +36,7 @@ class TokenStore:
 
     def save(self, user_id: str, tokens: OAuthTokens) -> None:
         payload = tokens.model_dump(mode="json")
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn:
             conn.execute(
                 """INSERT INTO oauth_tokens (user_id, tokens_json, updated_at)
                    VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -47,7 +48,7 @@ class TokenStore:
             conn.commit()
 
     def get(self, user_id: str) -> OAuthTokens | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT tokens_json FROM oauth_tokens WHERE user_id = ?",
                 (user_id,),
@@ -57,11 +58,11 @@ class TokenStore:
         return OAuthTokens.model_validate_json(row["tokens_json"])
 
     def delete(self, user_id: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn:
             conn.execute("DELETE FROM oauth_tokens WHERE user_id = ?", (user_id,))
             conn.commit()
 
     def list_user_ids(self) -> list[str]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute("SELECT user_id FROM oauth_tokens ORDER BY user_id").fetchall()
         return [row[0] for row in rows]

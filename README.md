@@ -26,7 +26,7 @@ Expone el **protocolo MCP en `/mcp`** con autenticación Bearer, más las rutas 
 OAuth y webhooks en el mismo puerto. Pensado para hospedarse (ver
 [`../scaleflow-mcp-host`](../scaleflow-mcp-host)).
 
-Endpoints HTTP: `GET /mcp` (MCP), `GET /health`, `GET /auth/login?key=<api-key>`,
+Endpoints HTTP: `GET /mcp` (MCP), `GET /health`, `GET|POST /auth/login`,
 `GET /auth/callback`, `GET|POST /webhooks/oura`.
 
 ## Autenticación
@@ -38,16 +38,21 @@ Dos identidades trabajan juntas:
 1. **Identidad del agente** — cada agente/cliente se conecta al MCP con
    `Authorization: Bearer <api-key>`. Las keys se definen en `config/tenants.yaml`
    (ver `config/tenants.example.yaml`); cada key mapea a una persona (`user`).
-2. **Cuenta Oura de la persona** — cada miembro conecta SU propio anillo con un
-   **link personalizado de un solo clic**:
+2. **Cuenta Oura de la persona** — cada miembro conecta SU propio anillo. El
+   link es **el mismo para todo el mundo**:
 
    ```
-   https://oura.scaleflow.tech/auth/login?key=<su-api-key>
+   https://oura.scaleflow.tech/auth/login
    ```
 
-   Hace clic → consiente en Oura → los tokens se guardan server-side bajo su
-   `user` y se refrescan solos. Nunca pega tokens a mano. El `state` de OAuth va
-   firmado (HMAC) para asociar el callback a la persona correcta.
+   Pega su API key en el formulario → consiente en Oura → los tokens se guardan
+   server-side bajo su `user` y se refrescan solos. Nunca pega tokens a mano. El
+   `state` de OAuth va firmado (HMAC) para asociar el callback a la persona
+   correcta.
+
+   La key va en el cuerpo del POST, nunca en la URL: en la query string
+   acabaría escrita en los logs de acceso del proxy y en el historial del
+   navegador.
 
 Requiere en `.env`: `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, `OURA_STATE_SECRET`,
 `OURA_REDIRECT_URI` (la URL pública registrada en la app de Oura) y
