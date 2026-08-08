@@ -6,7 +6,6 @@ member connects their own ring. Tokens OAuth se guardan por `user`.
 
 Formato de `config/tenants.yaml`:
 
-    admin_key: "sk-admin-..."        # opcional
     default_tenant: "scaleflow"
     tenants:
       scaleflow:

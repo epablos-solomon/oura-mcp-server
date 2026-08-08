@@ -3,9 +3,16 @@
 # guardan sus tokens OAuth de Oura. Cada miembro conecta SU propio anillo.
 #
 # El agente MCP se autentica con: Authorization: Bearer <key>
-# La persona conecta su cuenta abriendo: /auth/login?key=<key>
+# La persona conecta su cuenta abriendo /auth/login y pegando su <key> en el
+# formulario (la key nunca viaja en la URL).
+#
+# Genera keys asi, nunca a mano:
+#   python -c "from oura_mcp_server.auth.tenants import generate_api_key; \
+#              print(generate_api_key('oura-nombre'))"
+#
+# Tras editar este archivo en la VM basta con reiniciar el contenedor
+# (./config es volumen); no hace falta reconstruir la imagen.
 
-admin_key: "sk-admin-oura-CHANGE-ME"
 default_tenant: "scaleflow"
 
 tenants:
