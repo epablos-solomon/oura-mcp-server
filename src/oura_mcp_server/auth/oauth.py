@@ -1,12 +1,28 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
 
 from oura_mcp_server.config import Settings
 from oura_mcp_server.models import OAuthTokens
+
+
+def scopes_faltantes(pedidos: str, concedidos: str | None) -> list[str]:
+    """Scopes que se pidieron y Oura no concedio, en el orden en que se pidieron.
+
+    Oura descarta en silencio los nombres que no reconoce y devuelve 200 con el
+    subconjunto valido, prefijando cada uno con `extapi:`. Sin esta comparacion
+    un scope mal escrito solo se nota mucho despues, como un 401 inexplicable
+    en las tools que dependian de el.
+
+    Si la respuesta no trae `scope` no hay nada que comparar: devuelve [] en vez
+    de reportar todo como faltante.
+    """
+    if not concedidos:
+        return []
+    otorgados = {s.split(":", 1)[-1] for s in concedidos.split()}
+    return [s for s in pedidos.split() if s not in otorgados]
 
 
 class OuraOAuth2Manager:

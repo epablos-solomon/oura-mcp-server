@@ -20,8 +20,13 @@ class Settings(BaseSettings):
     oura_client_id: str | None = None
     oura_client_secret: str | None = None
     oura_redirect_uri: str = "http://127.0.0.1:8000/auth/callback"
-    # Scopes que cubren toda la informacion disponible de la API v2 de Oura.
-    oura_scopes: str = "email personal daily heartrate workout tag session spo2Daily"
+    # Identificadores reales de los scopes de la API v2 (los mismos que se
+    # marcan en la app de Oura). Ojo: es `spo2`, no `spo2Daily` — Oura descarta
+    # los nombres que no reconoce sin avisar.
+    oura_scopes: str = (
+        "email personal daily heartrate workout tag session "
+        "spo2 stress heart_health ring_configuration"
+    )
 
     # Dev fallback (un solo usuario; ignora multi-tenant)
     oura_bearer_token: str | None = None

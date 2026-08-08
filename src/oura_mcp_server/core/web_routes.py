@@ -15,7 +15,7 @@ import logging
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from oura_mcp_server.auth.oauth import OuraOAuth2Manager
+from oura_mcp_server.auth.oauth import OuraOAuth2Manager, scopes_faltantes
 from oura_mcp_server.auth.state import sign_state, verify_state
 from oura_mcp_server.auth.tenants import resolve_tenant
 from oura_mcp_server.auth.token_store import TokenStore
@@ -86,7 +86,19 @@ def register_web_routes(mcp, settings: Settings, store: TokenStore) -> None:
 
         tokens = await oauth.exchange_code(code)
         store.save(user_id, tokens)
-        logger.info("Oura conectado para user_id=%s", user_id)
+
+        faltan = scopes_faltantes(settings.oura_scopes, tokens.scope)
+        if faltan:
+            logger.warning(
+                "Oura no concedio estos scopes a user_id=%s: %s. Las tools que "
+                "dependan de ellos respondera 401. Revisa que esten habilitados "
+                "en la app de Oura y que el identificador sea correcto.",
+                user_id,
+                " ".join(faltan),
+            )
+        logger.info(
+            "Oura conectado para user_id=%s (scopes: %s)", user_id, tokens.scope
+        )
         return HTMLResponse(
             f"<html><body style='font-family:sans-serif'>"
             f"<h2>Cuenta Oura conectada</h2>"
