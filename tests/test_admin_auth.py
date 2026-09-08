@@ -59,3 +59,24 @@ def test_los_fallos_expiran_fuera_de_la_ventana(monkeypatch) -> None:
     tiempo_real = time_mod.time
     monkeypatch.setattr(time_mod, "time", lambda: tiempo_real() + 2)
     assert limiter.bloqueado() is False
+
+
+from oura_mcp_server.admin.auth import create_csrf_token, is_valid_csrf_token
+
+
+def test_un_token_csrf_generado_para_la_sesion_es_valido() -> None:
+    cookie = create_admin_session("secreto")
+    token = create_csrf_token(cookie, "secreto")
+    assert is_valid_csrf_token(token, cookie, "secreto") is True
+
+
+def test_un_token_csrf_de_otra_sesion_es_invalido() -> None:
+    cookie1 = create_admin_session("secreto")
+    cookie2 = create_admin_session("secreto")
+    token = create_csrf_token(cookie1, "secreto")
+    assert is_valid_csrf_token(token, cookie2, "secreto") is False
+
+
+def test_sin_token_csrf_es_invalido() -> None:
+    cookie = create_admin_session("secreto")
+    assert is_valid_csrf_token(None, cookie, "secreto") is False

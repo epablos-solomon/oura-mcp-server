@@ -6,6 +6,9 @@ de OAuth como el login de admin.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+
 from oura_mcp_server.auth.state import sign_state, verify_state
 
 ADMIN_SESSION_SUBJECT = "admin"
@@ -57,3 +60,14 @@ class LoginRateLimiter:
     def registrar_exito(self, clave: str = "global") -> None:
         with self._lock:
             self._fallos[clave] = []
+
+
+def create_csrf_token(session_cookie: str, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), session_cookie.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def is_valid_csrf_token(token: str | None, session_cookie: str | None, secret: str) -> bool:
+    if not token or not session_cookie:
+        return False
+    expected = create_csrf_token(session_cookie, secret)
+    return hmac.compare_digest(token, expected)
