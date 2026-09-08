@@ -37,6 +37,16 @@ def _key_id(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
 
 
+def _key_id_de_entrada(key_entry: object) -> str | None:
+    """key_id de una entrada de api_keys, o None si la entrada esta malformada."""
+    if not isinstance(key_entry, dict):
+        return None
+    key = key_entry.get("key")
+    if not isinstance(key, str) or not key:
+        return None
+    return _key_id(key)
+
+
 def _mask(key: str) -> str:
     if len(key) <= 14:
         return key
@@ -48,7 +58,14 @@ def _load_raw(path: Path) -> dict:
         return {"default_tenant": "scaleflow", "tenants": {}}
     with open(path) as f:
         data = yaml.safe_load(f) or {}
-    data.setdefault("tenants", {})
+    if not isinstance(data, dict):
+        return {"default_tenant": "scaleflow", "tenants": {}}
+    # `tenants:` sin nada debajo parsea como None (no como clave ausente), asi
+    # que setdefault no alcanza. Cualquier forma que no sea un mapping se
+    # normaliza a {} para que el panel siga abriendo y muestre la pagina vacia
+    # en vez de un 500.
+    if not isinstance(data.get("tenants"), dict):
+        data["tenants"] = {}
     return data
 
 
@@ -61,18 +78,27 @@ def _save_raw(path: Path, data: dict) -> None:
 def list_all(path: Path) -> list[KeyEntry]:
     data = _load_raw(path)
     entradas: list[KeyEntry] = []
-    for tenant_id, tenant_data in data.get("tenants", {}).items():
+    # Lectura tolerante: tenants.yaml tambien se edita a mano por SSH, y una
+    # entrada mal escrita no debe tumbar la pagina entera (que es justo donde
+    # el admin va a mirar para diagnosticarla). Se salta lo roto, no se repara.
+    for tenant_id, tenant_data in data["tenants"].items():
+        if not isinstance(tenant_data, dict):
+            continue
         tenant_name = tenant_data.get("name", tenant_id)
-        for key_entry in tenant_data.get("api_keys", []):
-            key = key_entry["key"]
+        for key_entry in tenant_data.get("api_keys") or []:
+            if not isinstance(key_entry, dict):
+                continue
+            key = key_entry.get("key")
+            if not isinstance(key, str) or not key:
+                continue
             entradas.append(
                 KeyEntry(
-                    tenant_id=tenant_id,
-                    tenant_name=tenant_name,
+                    tenant_id=str(tenant_id),
+                    tenant_name=str(tenant_name),
                     key_id=_key_id(key),
                     key_masked=_mask(key),
-                    agent=key_entry.get("agent", ""),
-                    user=key_entry.get("user", ""),
+                    agent=str(key_entry.get("agent") or ""),
+                    user=str(key_entry.get("user") or ""),
                 )
             )
     return entradas
@@ -82,10 +108,15 @@ def create_key(path: Path, tenant_id: str, tenant_name: str, agent: str, user: s
     """Crea una key nueva y la persiste. Devuelve la key completa (una sola vez)."""
     with _write_lock:
         data = _load_raw(path)
-        tenants = data.setdefault("tenants", {})
-        tenant = tenants.setdefault(tenant_id, {"name": tenant_name, "api_keys": []})
+        tenants = data["tenants"]
+        tenant = tenants.get(tenant_id)
+        if not isinstance(tenant, dict):
+            tenant = {"name": tenant_name, "api_keys": []}
+            tenants[tenant_id] = tenant
         tenant.setdefault("name", tenant_name)
-        tenant.setdefault("api_keys", [])
+        # `api_keys:` vacio parsea como None: setdefault lo dejaria en None.
+        if not isinstance(tenant.get("api_keys"), list):
+            tenant["api_keys"] = []
 
         key = generate_api_key(f"oura-{user}" if user else f"oura-{tenant_id}")
         tenant["api_keys"].append({"key": key, "agent": agent, "user": user})
@@ -100,9 +131,13 @@ def revoke_key(path: Path, key_id: str) -> bool:
     with _write_lock:
         data = _load_raw(path)
         encontrada = False
-        for tenant_data in data.get("tenants", {}).values():
-            api_keys = tenant_data.get("api_keys", [])
-            restantes = [k for k in api_keys if _key_id(k["key"]) != key_id]
+        for tenant_data in data["tenants"].values():
+            if not isinstance(tenant_data, dict):
+                continue
+            api_keys = tenant_data.get("api_keys") or []
+            # Una entrada que no se puede interpretar se conserva tal cual:
+            # revocar no debe borrar lo que no entendemos.
+            restantes = [k for k in api_keys if _key_id_de_entrada(k) != key_id]
             if len(restantes) != len(api_keys):
                 encontrada = True
             tenant_data["api_keys"] = restantes
