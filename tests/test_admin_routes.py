@@ -1,6 +1,7 @@
 """Panel de administracion (/admin/*): login, tenants, OAuth, webhooks, salud."""
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from starlette.testclient import TestClient
 from oura_mcp_server.admin.auth import ADMIN_SESSION_COOKIE
 from oura_mcp_server.admin.routes import register_admin_routes
 from oura_mcp_server.auth import tenants as tenants_mod
+from oura_mcp_server.auth.tenants import resolve_tenant
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.config import Settings
 from oura_mcp_server.core.server import create_mcp_server
@@ -163,3 +165,74 @@ def test_next_absoluto_al_loguear_no_produce_open_redirect(cliente: TestClient) 
     assert r.status_code == 303
     assert r.headers["location"] != "https://evil.example/phish"
     assert r.headers["location"] == "/admin/tenants"
+
+
+# --- Panel de tenants/keys ---
+
+def test_get_tenants_sin_sesion_redirige_al_login(cliente: TestClient) -> None:
+    r = cliente.get("/admin/tenants", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/admin/login")
+
+
+def test_get_tenants_lista_las_keys_enmascaradas(cliente: TestClient) -> None:
+    _login(cliente)
+    r = cliente.get("/admin/tenants")
+    assert r.status_code == 200
+    assert "sk-oura-kike-existente" not in r.text
+    assert "kike" in r.text
+
+
+def test_crear_key_la_reconoce_de_inmediato_sin_reiniciar(cliente: TestClient) -> None:
+    _login(cliente)
+    csrf = _csrf_de(cliente)
+    r = cliente.post(
+        "/admin/tenants/create",
+        data={"csrf": csrf, "tenant_id": "scaleflow", "tenant_name": "Scaleflow Internal",
+              "user": "amber", "agent": "openclaw"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    reveal_url = r.headers["location"]
+    pagina = cliente.get(reveal_url)
+    key = re.search(r"sk-oura-amber-[0-9a-f]+", pagina.text).group(0)
+
+    assert resolve_tenant(key) is not None
+
+
+def test_la_key_no_se_vuelve_a_mostrar_en_una_segunda_visita(cliente: TestClient) -> None:
+    """La key completa solo se ve una vez: la URL de revelado es de un solo uso."""
+    _login(cliente)
+    csrf = _csrf_de(cliente)
+    r = cliente.post(
+        "/admin/tenants/create",
+        data={"csrf": csrf, "tenant_id": "scaleflow", "tenant_name": "Scaleflow Internal",
+              "user": "amber", "agent": "openclaw"},
+        follow_redirects=False,
+    )
+    reveal_url = r.headers["location"]
+    cliente.get(reveal_url)
+    segunda = cliente.get(reveal_url)
+    assert "sk-oura-amber-" not in segunda.text
+
+
+def test_crear_key_sin_csrf_rechaza(cliente: TestClient) -> None:
+    _login(cliente)
+    r = cliente.post(
+        "/admin/tenants/create",
+        data={"tenant_id": "scaleflow", "tenant_name": "x", "user": "amber", "agent": "y"},
+    )
+    assert r.status_code == 403
+
+
+def test_revocar_key_la_invalida_de_inmediato_sin_reiniciar(cliente: TestClient) -> None:
+    _login(cliente)
+    csrf = _csrf_de(cliente)
+    key_id = hashlib.sha256(b"sk-oura-kike-existente").hexdigest()[:12]
+
+    r = cliente.post(
+        "/admin/tenants/revoke", data={"csrf": csrf, "key_id": key_id}, follow_redirects=False
+    )
+
+    assert r.status_code == 303
+    assert resolve_tenant("sk-oura-kike-existente") is None
