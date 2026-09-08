@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # Token de verificacion de los webhooks: el mismo que se registra al crear
     # la suscripcion. Sin el, /webhooks/oura falla cerrado (503).
     oura_webhook_verification_token: str | None = None
+    # Panel de administracion (/admin/*): password compartido, un solo admin.
+    admin_password: str | None = None
 
 
 @lru_cache(maxsize=1)
