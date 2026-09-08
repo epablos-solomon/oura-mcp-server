@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from oura_mcp_server.admin.auth import (
     ADMIN_SESSION_MAX_AGE_SECONDS,
     LoginRateLimiter,
     create_admin_session,
     is_valid_admin_session,
 )
+from oura_mcp_server.auth.state import sign_state
 
 
 def test_una_sesion_recien_creada_es_valida() -> None:
@@ -22,6 +25,29 @@ def test_una_cookie_firmada_con_otro_secreto_es_invalida() -> None:
 
 def test_sin_cookie_es_invalida() -> None:
     assert is_valid_admin_session(None, "secreto") is False
+
+
+def test_un_state_de_oauth_para_admin_no_vale_como_sesion() -> None:
+    """El `state` de /auth/login y la cookie de admin comparten OURA_STATE_SECRET.
+
+    /auth/login firma `sign_state(tenant.oura_user_id, secreto)` y devuelve ese
+    valor a cualquiera con una API key valida. Si alguien crea una key con
+    `user: admin`, el state resultante es identico a lo que firmaria
+    create_admin_session: pegarlo como cookie daria acceso al panel sin saber
+    ADMIN_PASSWORD. Los dos usos tienen que estar separados por dominio.
+    """
+    state_de_oauth = sign_state("admin", "secreto")
+    assert is_valid_admin_session(state_de_oauth, "secreto") is False
+
+
+@pytest.mark.parametrize(
+    "cookie",
+    ["not.valid.base64!!", "sin-punto", "ñoño.ñoño", "....", "a.b", "a.\x80\x81"],
+)
+def test_una_cookie_malformada_es_invalida_sin_reventar(cookie: str) -> None:
+    """Guard de sesion: cualquier visitante puede mandar basura en la cookie y
+    eso tiene que redirigir al login, nunca reventar con un 500."""
+    assert is_valid_admin_session(cookie, "secreto") is False
 
 
 def test_una_cookie_vencida_es_invalida(monkeypatch) -> None:
@@ -80,3 +106,10 @@ def test_un_token_csrf_de_otra_sesion_es_invalido() -> None:
 def test_sin_token_csrf_es_invalido() -> None:
     cookie = create_admin_session("secreto")
     assert is_valid_csrf_token(None, cookie, "secreto") is False
+
+
+def test_un_token_csrf_no_ascii_es_invalido_sin_reventar() -> None:
+    """El token viene de un formulario: comparar str con acentos haria que
+    compare_digest lanzara TypeError y el POST devolviera 500 en vez de 403."""
+    cookie = create_admin_session("secreto")
+    assert is_valid_csrf_token("contraseñá-ñoño-🙂", cookie, "secreto") is False

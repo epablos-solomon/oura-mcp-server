@@ -2,7 +2,8 @@
 
 Reutiliza el HMAC de auth/state.py (mismo secreto OURA_STATE_SECRET) en vez de
 montar un sistema de sesiones nuevo: un solo secreto protege tanto el `state`
-de OAuth como el login de admin.
+de OAuth como el login de admin. Los dos usos estan separados por dominio (ver
+_session_secret): un `state` de OAuth nunca vale como cookie de admin.
 """
 from __future__ import annotations
 
@@ -16,14 +17,33 @@ ADMIN_SESSION_MAX_AGE_SECONDS = 12 * 60 * 60  # 12h
 ADMIN_SESSION_COOKIE = "admin_session"
 
 
+def _session_secret(secret: str) -> str:
+    """Deriva un secreto propio para las sesiones de admin: aunque comparta
+    OURA_STATE_SECRET con el `state` de OAuth, un token firmado para uno
+    nunca debe validar como el otro.
+
+    Sin esto, una key de tenant creada con `user: admin` permitiria pedir un
+    `state` en /auth/login y pegarlo como cookie admin_session.
+    """
+    return hmac.new(secret.encode("utf-8"), b"admin-session-v1", hashlib.sha256).hexdigest()
+
+
 def create_admin_session(secret: str) -> str:
-    return sign_state(ADMIN_SESSION_SUBJECT, secret)
+    return sign_state(ADMIN_SESSION_SUBJECT, _session_secret(secret))
 
 
 def is_valid_admin_session(cookie_value: str | None, secret: str) -> bool:
     if not cookie_value:
         return False
-    subject = verify_state(cookie_value, secret, max_age_seconds=ADMIN_SESSION_MAX_AGE_SECONDS)
+    # La cookie llega del navegador sin validar: verify_state hace base64 y
+    # .encode("ascii") sin proteger, asi que un valor basura reventaria el
+    # guard de sesion con un 500 en vez de mandar al login.
+    try:
+        subject = verify_state(
+            cookie_value, _session_secret(secret), max_age_seconds=ADMIN_SESSION_MAX_AGE_SECONDS
+        )
+    except Exception:
+        return False
     return subject == ADMIN_SESSION_SUBJECT
 
 
@@ -70,4 +90,7 @@ def is_valid_csrf_token(token: str | None, session_cookie: str | None, secret: s
     if not token or not session_cookie:
         return False
     expected = create_csrf_token(session_cookie, secret)
-    return hmac.compare_digest(token, expected)
+    # Se comparan bytes, no str: compare_digest sobre str exige que ambos sean
+    # ASCII y lanza TypeError si el token (dato de formulario, no confiable)
+    # trae acentos o emoji.
+    return hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
