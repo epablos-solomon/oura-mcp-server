@@ -225,3 +225,65 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         tenants_store.revoke_key(Path(settings.tenants_config_path), key_id)
         tenants_mod.reload()
         return RedirectResponse("/admin/tenants", status_code=303)
+
+    @mcp.custom_route("/admin/oauth", methods=["GET"])
+    async def admin_oauth(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+
+        csrf = create_csrf_token(request.cookies[ADMIN_SESSION_COOKIE], _admin_secret(settings))
+        entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        registros = {r.user_id: r for r in store.list_with_metadata()}
+        usuarios = sorted({e.user for e in entradas if e.user} | set(registros.keys()))
+
+        filas = []
+        for user_id in usuarios:
+            keys_de_usuario = [e for e in entradas if e.user == user_id]
+            tenant_desc = ", ".join(
+                f"{escape(e.tenant_id, quote=True)}/{escape(e.agent, quote=True)}"
+                for e in keys_de_usuario
+            ) or "(sin key)"
+            registro = registros.get(user_id)
+            if registro is None:
+                estado, scopes, actualizado, boton = "no conectado", "", "", ""
+            else:
+                expirado = "si" if registro.tokens.is_expired() else "no"
+                estado = f"conectado (access token expirado ahora: {expirado})"
+                scopes = escape(registro.tokens.scope or "", quote=True)
+                actualizado = escape(registro.updated_at, quote=True)
+                boton = (
+                    "<form method='post' action='/admin/oauth/desconectar' style='margin:0'>"
+                    f'<input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">'
+                    f"<input type='hidden' name='user_id' value='{escape(user_id, quote=True)}'>"
+                    "<button type='submit'>Forzar reconexion</button></form>"
+                )
+            filas.append(
+                f"<tr><td>{escape(user_id, quote=True)}</td><td>{tenant_desc}</td><td>{estado}</td>"
+                f"<td>{scopes}</td><td>{actualizado}</td><td>{boton}</td></tr>"
+            )
+
+        body = f"""
+<table>
+<tr><th>Usuario</th><th>Tenant/agente</th><th>Estado</th><th>Scopes</th>
+    <th>Actualizado</th><th></th></tr>
+{"".join(filas)}
+</table>
+"""
+        return HTMLResponse(page("Conexiones OAuth", body))
+
+    @mcp.custom_route("/admin/oauth/desconectar", methods=["POST"])
+    async def admin_oauth_desconectar(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+
+        form = await request.form()
+        session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
+            return HTMLResponse(page("Conexiones OAuth", error_banner("CSRF invalido.")), status_code=403)
+
+        user_id = str(form.get("user_id") or "")
+        if user_id:
+            store.delete(user_id)
+        return RedirectResponse("/admin/oauth", status_code=303)

@@ -15,6 +15,7 @@ from oura_mcp_server.auth.tenants import resolve_tenant
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.config import Settings
 from oura_mcp_server.core.server import create_mcp_server
+from oura_mcp_server.models import OAuthTokens
 
 TENANTS_YAML = """
 default_tenant: scaleflow
@@ -236,3 +237,44 @@ def test_revocar_key_la_invalida_de_inmediato_sin_reiniciar(cliente: TestClient)
 
     assert r.status_code == 303
     assert resolve_tenant("sk-oura-kike-existente") is None
+
+
+# --- Panel de estado OAuth ---
+
+def test_get_oauth_sin_sesion_redirige_al_login(cliente: TestClient) -> None:
+    r = cliente.get("/admin/oauth", follow_redirects=False)
+    assert r.status_code == 302
+
+
+def test_oauth_lista_usuarios_con_key_sin_conectar_y_conectados(cliente: TestClient) -> None:
+    cliente.store.save("kike", OAuthTokens(access_token="a", refresh_token="r", scope="daily email"))
+    _login(cliente)
+
+    r = cliente.get("/admin/oauth")
+
+    assert r.status_code == 200
+    assert "kike" in r.text
+    assert "daily email" in r.text
+
+
+def test_forzar_reconexion_borra_los_tokens_guardados(cliente: TestClient) -> None:
+    cliente.store.save("kike", OAuthTokens(access_token="a", refresh_token="r"))
+    _login(cliente)
+    csrf = _csrf_de(cliente, "/admin/oauth")
+
+    r = cliente.post(
+        "/admin/oauth/desconectar", data={"csrf": csrf, "user_id": "kike"}, follow_redirects=False
+    )
+
+    assert r.status_code == 303
+    assert cliente.store.get("kike") is None
+
+
+def test_desconectar_sin_csrf_rechaza(cliente: TestClient) -> None:
+    cliente.store.save("kike", OAuthTokens(access_token="a"))
+    _login(cliente)
+
+    r = cliente.post("/admin/oauth/desconectar", data={"user_id": "kike"})
+
+    assert r.status_code == 403
+    assert cliente.store.get("kike") is not None
