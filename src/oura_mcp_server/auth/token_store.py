@@ -3,10 +3,18 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
 from oura_mcp_server.models import OAuthTokens
+
+
+@dataclass
+class TokenRecord:
+    user_id: str
+    tokens: OAuthTokens
+    updated_at: str
 
 
 class TokenStore:
@@ -66,3 +74,17 @@ class TokenStore:
         with closing(self._connect()) as conn:
             rows = conn.execute("SELECT user_id FROM oauth_tokens ORDER BY user_id").fetchall()
         return [row[0] for row in rows]
+
+    def list_with_metadata(self) -> list[TokenRecord]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT user_id, tokens_json, updated_at FROM oauth_tokens ORDER BY user_id"
+            ).fetchall()
+        return [
+            TokenRecord(
+                user_id=row["user_id"],
+                tokens=OAuthTokens.model_validate_json(row["tokens_json"]),
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
