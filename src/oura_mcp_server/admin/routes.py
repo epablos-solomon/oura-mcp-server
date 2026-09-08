@@ -35,15 +35,15 @@ from oura_mcp_server.config import Settings
 logger = logging.getLogger(__name__)
 
 _FORMULARIO_LOGIN = """
+<div class="card login-card">
 <form method="post" action="/admin/login">
   <input type="hidden" name="next" value="{next}">
-  <input type="password" name="password" placeholder="Password de admin"
-         autocomplete="off" required style="width:100%;padding:.6rem;font-size:1rem">
-  <button type="submit" style="margin-top:.8rem;padding:.6rem 1.2rem;font-size:1rem">
-    Entrar
-  </button>
+  <label>Password de admin</label>
+  <input type="password" name="password" placeholder="••••••••" autocomplete="off" required>
+  <p><button type="submit">Entrar</button></p>
 </form>
 {error}
+</div>
 """
 
 
@@ -206,25 +206,36 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         )
         aviso = ""
         if key_nueva:
+            key_value = escape(key_nueva, quote=True)
             aviso = (
-                '<div class="aviso"><b>Key creada, copiala ahora — no se vuelve a mostrar:</b>'
-                f"<pre>{escape(key_nueva, quote=True)}</pre></div>"
+                '<div class="aviso"><b>Key creada — copiala ahora, no se vuelve a mostrar:</b>'
+                '<div class="key-copy">'
+                f'<input type="text" id="key-value" value="{key_value}" readonly>'
+                '<button type="button" id="copy-btn" '
+                "onclick=\"navigator.clipboard.writeText(document.getElementById('key-value').value)"
+                ".then(function(){var b=document.getElementById('copy-btn');b.textContent='¡Copiado!';"
+                "setTimeout(function(){b.textContent='Copiar';},1500);})\">Copiar</button>"
+                "</div></div>"
             )
         body = f"""
 {aviso}
+<div class="card">
 <table>
 <tr><th>Tenant</th><th>User</th><th>Agent</th><th>Key</th><th></th></tr>
 {filas}
 </table>
+</div>
+<div class="card">
 <h3>Crear key nueva</h3>
 <form method="post" action="/admin/tenants/create">
   <input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">
-  <label>Tenant <input name="tenant_id" value="scaleflow" required></label><br>
-  <label>Tenant name <input name="tenant_name" value="Scaleflow Internal" required></label><br>
-  <label>User <input name="user" required></label><br>
-  <label>Agent <input name="agent" required></label><br>
-  <button type="submit">Crear</button>
+  <label>Tenant</label><input name="tenant_id" value="scaleflow" required>
+  <label>Tenant name</label><input name="tenant_name" value="Scaleflow Internal" required>
+  <label>User</label><input name="user" required>
+  <label>Agent</label><input name="agent" required>
+  <p><button type="submit">Crear</button></p>
 </form>
+</div>
 """
         return _html(page("Tenants", body))
 
@@ -302,10 +313,14 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
             ) or "(sin key)"
             registro = registros.get(user_id)
             if registro is None:
-                estado, scopes, actualizado, boton = "no conectado", "", "", ""
+                estado = '<span class="badge badge-off">no conectado</span>'
+                scopes, actualizado, boton = "", "", ""
             else:
                 expirado = "si" if registro.tokens.is_expired() else "no"
-                estado = f"conectado (access token expirado ahora: {expirado})"
+                estado = (
+                    '<span class="badge badge-ok">conectado</span> '
+                    f"(access token expirado ahora: {expirado})"
+                )
                 scopes = escape(registro.tokens.scope or "", quote=True)
                 actualizado = escape(registro.updated_at, quote=True)
                 boton = (
@@ -320,11 +335,13 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
             )
 
         body = f"""
+<div class="card">
 <table>
 <tr><th>Usuario</th><th>Tenant/agente</th><th>Estado</th><th>Scopes</th>
     <th>Actualizado</th><th></th></tr>
 {"".join(filas)}
 </table>
+</div>
 """
         return _html(page("Conexiones OAuth", body))
 
@@ -392,21 +409,23 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         callback_url = escape(f"https://{request.url.hostname}/webhooks/oura", quote=True)
         verification_token = escape(settings.oura_webhook_verification_token or "", quote=True)
         body = f"""
+<div class="card">
 <table>
 <tr><th>ID</th><th>Callback</th><th>Event</th><th>Data</th><th>Expira</th><th></th></tr>
 {filas}
 </table>
+</div>
+<div class="card">
 <h3>Crear suscripcion</h3>
 <form method="post" action="/admin/webhooks/crear">
   <input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">
-  <label>Callback URL <input name="callback_url" value="{callback_url}" required></label><br>
-  <label>Verification token
-    <input name="verification_token" value="{verification_token}" required>
-  </label><br>
-  <label>Event type <input name="event_type" value="update"></label><br>
-  <label>Data type <input name="data_type" value="daily_sleep"></label><br>
-  <button type="submit">Crear</button>
+  <label>Callback URL</label><input name="callback_url" value="{callback_url}" required>
+  <label>Verification token</label><input name="verification_token" value="{verification_token}" required>
+  <label>Event type</label><input name="event_type" value="update">
+  <label>Data type</label><input name="data_type" value="daily_sleep">
+  <p><button type="submit">Crear</button></p>
 </form>
+</div>
 """
         return _html(page("Webhooks", body))
 
@@ -508,15 +527,19 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         )
 
         body = f"""
-<p>tenants/keys: {len(entradas)} · usuarios conectados: {len(conectados)}</p>
+<p style="color:var(--muted)">tenants/keys: {len(entradas)} · usuarios conectados: {len(conectados)}</p>
+<div class="card">
 <table>
 <tr><th>Config</th><th>Valor</th></tr>
 {filas_config}
 </table>
-<h3>Avisos recientes</h3>
+</div>
+<div class="card">
+<h3 style="margin-top:0">Avisos recientes</h3>
 <table>
 <tr><th>Nivel</th><th>Logger</th><th>Mensaje</th><th>Cuando</th></tr>
 {filas_logs}
 </table>
+</div>
 """
         return _html(page("Salud", body))
