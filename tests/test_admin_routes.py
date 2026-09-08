@@ -127,3 +127,39 @@ def test_login_sin_admin_password_configurado_falla_con_mensaje_claro(
 
     assert r.status_code == 500
     assert "ADMIN_PASSWORD" in r.text
+
+
+def test_login_sin_oura_state_secret_configurado_falla_con_mensaje_claro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(token_db_path=tmp_path / "t.sqlite3", admin_password=ADMIN_PASSWORD)
+    store = TokenStore(settings.token_db_path)
+    mcp = create_mcp_server(settings, store)
+    register_admin_routes(mcp, settings, store)
+    c = TestClient(mcp.http_app(), base_url="https://testserver")
+
+    r = c.post("/admin/login", data={"password": ADMIN_PASSWORD, "next": "/"})
+
+    assert r.status_code == 500
+    assert "OURA_STATE_SECRET" in r.text
+
+
+# --- next: XSS reflejado y open redirect ---
+
+def test_next_con_html_no_se_refleja_sin_escapar(cliente: TestClient) -> None:
+    """El parametro `next` viaja al form: si no se escapa, rompe el atributo HTML."""
+    r = cliente.get('/admin/login?next="><script>alert(1)</script>')
+    assert r.status_code == 200
+    assert "<script>alert(1)</script>" not in r.text
+
+
+def test_next_absoluto_al_loguear_no_produce_open_redirect(cliente: TestClient) -> None:
+    """Un `next` a otro dominio no debe redirigir fuera del sitio tras login."""
+    r = cliente.post(
+        "/admin/login",
+        data={"password": ADMIN_PASSWORD, "next": "https://evil.example/phish"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert r.headers["location"] != "https://evil.example/phish"
+    assert r.headers["location"] == "/admin/tenants"

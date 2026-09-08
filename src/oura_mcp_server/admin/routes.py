@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from html import escape
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -41,6 +42,17 @@ def _admin_secret(settings: Settings) -> str:
     return settings.oura_state_secret or ""
 
 
+def _safe_next_path(value: str) -> str:
+    """Evita open-redirect: solo se acepta una ruta relativa de un solo `/`.
+
+    `//evil.example` y `/\\evil.example` son ambiguos para algunos navegadores
+    (los tratan como protocol-relative), asi que tambien se rechazan.
+    """
+    if value.startswith("/") and not value.startswith("//") and not value.startswith("/\\"):
+        return value
+    return "/admin/tenants"
+
+
 def _require_admin(request: Request, settings: Settings) -> RedirectResponse | None:
     cookie = request.cookies.get(ADMIN_SESSION_COOKIE)
     if is_valid_admin_session(cookie, _admin_secret(settings)):
@@ -56,10 +68,10 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 
     @mcp.custom_route("/admin/login", methods=["GET", "POST"])
     async def admin_login(request: Request) -> Response:
-        next_path = request.query_params.get("next", "/admin/tenants")
+        next_path = _safe_next_path(request.query_params.get("next", "/admin/tenants"))
 
         if request.method == "GET":
-            body = _FORMULARIO_LOGIN.format(next=next_path, error="")
+            body = _FORMULARIO_LOGIN.format(next=escape(next_path, quote=True), error="")
             return HTMLResponse(
                 page("Entrar", body, show_nav=False), headers={"Cache-Control": "no-store"}
             )
@@ -86,12 +98,12 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 
         form = await request.form()
         password = str(form.get("password") or "")
-        next_target = str(form.get("next") or "/admin/tenants")
+        next_target = _safe_next_path(str(form.get("next") or "/admin/tenants"))
 
         if not secrets.compare_digest(password, settings.admin_password):
             login_rate_limiter.registrar_fallo()
             body = _FORMULARIO_LOGIN.format(
-                next=next_target, error=error_banner("Password incorrecta.")
+                next=escape(next_target, quote=True), error=error_banner("Password incorrecta.")
             )
             return HTMLResponse(page("Entrar", body, show_nav=False), status_code=401)
 
