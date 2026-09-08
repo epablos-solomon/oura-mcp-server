@@ -11,6 +11,7 @@ import secrets
 from html import escape
 from pathlib import Path
 
+import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
@@ -26,6 +27,7 @@ from oura_mcp_server.admin.auth import (
 from oura_mcp_server.admin.templates import error_banner, page
 from oura_mcp_server.auth import tenants as tenants_mod
 from oura_mcp_server.auth.token_store import TokenStore
+from oura_mcp_server.client.oura import OuraClient
 from oura_mcp_server.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -287,3 +289,134 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         if user_id:
             store.delete(user_id)
         return RedirectResponse("/admin/oauth", status_code=303)
+
+    @mcp.custom_route("/admin/webhooks", methods=["GET"])
+    async def admin_webhooks(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+
+        csrf = create_csrf_token(request.cookies[ADMIN_SESSION_COOKIE], _admin_secret(settings))
+
+        if not settings.oura_client_id or not settings.oura_client_secret:
+            body = error_banner(
+                "OURA_CLIENT_ID / OURA_CLIENT_SECRET no configurados: no se pueden "
+                "gestionar webhooks."
+            )
+            return HTMLResponse(page("Webhooks", body))
+
+        client = OuraClient(settings, "")
+        try:
+            suscripciones = await client.list_webhooks()
+        except httpx.HTTPStatusError as exc:
+            body = error_banner(f"Error al listar webhooks: {exc.response.status_code}")
+            return HTMLResponse(page("Webhooks", body))
+
+        def _fila_webhook(s: dict) -> str:
+            wid = escape(str(s.get("id", "")), quote=True)
+            callback = escape(str(s.get("callback_url", "")), quote=True)
+            event_type = escape(str(s.get("event_type", "")), quote=True)
+            data_type = escape(str(s.get("data_type", "")), quote=True)
+            expiration = escape(str(s.get("expiration_time", "")), quote=True)
+            return (
+                f"<tr><td>{wid}</td><td>{callback}</td>"
+                f"<td>{event_type}</td><td>{data_type}</td>"
+                f"<td>{expiration}</td><td>"
+                "<form method='post' action='/admin/webhooks/renovar' style='display:inline'>"
+                f"<input type='hidden' name='csrf' value='{escape(csrf, quote=True)}'>"
+                f"<input type='hidden' name='subscription_id' value='{wid}'>"
+                "<button type='submit'>Renovar</button></form> "
+                "<form method='post' action='/admin/webhooks/eliminar' style='display:inline'>"
+                f"<input type='hidden' name='csrf' value='{escape(csrf, quote=True)}'>"
+                f"<input type='hidden' name='subscription_id' value='{wid}'>"
+                "<button type='submit'>Eliminar</button></form>"
+                "</td></tr>"
+            )
+
+        filas = "".join(_fila_webhook(s) for s in suscripciones)
+
+        callback_url = escape(f"https://{request.url.hostname}/webhooks/oura", quote=True)
+        verification_token = escape(settings.oura_webhook_verification_token or "", quote=True)
+        body = f"""
+<table>
+<tr><th>ID</th><th>Callback</th><th>Event</th><th>Data</th><th>Expira</th><th></th></tr>
+{filas}
+</table>
+<h3>Crear suscripcion</h3>
+<form method="post" action="/admin/webhooks/crear">
+  <input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">
+  <label>Callback URL <input name="callback_url" value="{callback_url}" required></label><br>
+  <label>Verification token
+    <input name="verification_token" value="{verification_token}" required>
+  </label><br>
+  <label>Event type <input name="event_type" value="update"></label><br>
+  <label>Data type <input name="data_type" value="daily_sleep"></label><br>
+  <button type="submit">Crear</button>
+</form>
+"""
+        return HTMLResponse(page("Webhooks", body))
+
+    @mcp.custom_route("/admin/webhooks/crear", methods=["POST"])
+    async def admin_webhooks_crear(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+        form = await request.form()
+        session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
+            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+
+        client = OuraClient(settings, "")
+        try:
+            await client.create_webhook(
+                callback_url=str(form.get("callback_url") or ""),
+                verification_token=str(form.get("verification_token") or ""),
+                event_type=str(form.get("event_type") or "update"),
+                data_type=str(form.get("data_type") or "daily_sleep"),
+            )
+        except httpx.HTTPStatusError as exc:
+            return HTMLResponse(
+                page("Webhooks", error_banner(f"Error al crear: {exc.response.status_code}")),
+                status_code=502,
+            )
+        return RedirectResponse("/admin/webhooks", status_code=303)
+
+    @mcp.custom_route("/admin/webhooks/renovar", methods=["POST"])
+    async def admin_webhooks_renovar(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+        form = await request.form()
+        session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
+            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+
+        client = OuraClient(settings, "")
+        try:
+            await client.renew_webhook(str(form.get("subscription_id") or ""))
+        except httpx.HTTPStatusError as exc:
+            return HTMLResponse(
+                page("Webhooks", error_banner(f"Error al renovar: {exc.response.status_code}")),
+                status_code=502,
+            )
+        return RedirectResponse("/admin/webhooks", status_code=303)
+
+    @mcp.custom_route("/admin/webhooks/eliminar", methods=["POST"])
+    async def admin_webhooks_eliminar(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+        form = await request.form()
+        session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
+            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+
+        client = OuraClient(settings, "")
+        try:
+            await client.delete_webhook(str(form.get("subscription_id") or ""))
+        except httpx.HTTPStatusError as exc:
+            return HTMLResponse(
+                page("Webhooks", error_banner(f"Error al eliminar: {exc.response.status_code}")),
+                status_code=502,
+            )
+        return RedirectResponse("/admin/webhooks", status_code=303)

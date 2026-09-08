@@ -5,6 +5,7 @@ import hashlib
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -335,3 +336,109 @@ def test_desconectar_sin_csrf_rechaza(cliente: TestClient) -> None:
 
     assert r.status_code == 403
     assert cliente.store.get("kike") is not None
+
+
+def _mock_oura_webhooks(monkeypatch: pytest.MonkeyPatch, respuestas: dict) -> list[str]:
+    """Sustituye httpx.AsyncClient por un doble que responde segun el metodo HTTP."""
+    llamadas: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        llamadas.append(request.method)
+        status, payload = respuestas.get(request.method, (200, {}))
+        return httpx.Response(status, json=payload)
+
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    return llamadas
+
+
+# --- Panel de webhooks ---
+
+def test_webhooks_sin_credenciales_configuradas_muestra_aviso(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "tenants.yaml").write_text(TENANTS_YAML)
+    settings = Settings(
+        token_db_path=tmp_path / "t.sqlite3",
+        oura_state_secret="secreto-de-test",
+        tenants_config_path=str(tmp_path / "tenants.yaml"),
+        admin_password=ADMIN_PASSWORD,
+    )
+    monkeypatch.setattr(tenants_mod, "get_settings", lambda: settings)
+    tenants_mod.reload()
+    store = TokenStore(settings.token_db_path)
+    mcp = create_mcp_server(settings, store)
+    register_admin_routes(mcp, settings, store)
+    c = TestClient(mcp.http_app(), base_url="https://testserver")
+
+    _login(c)
+    r = c.get("/admin/webhooks")
+
+    assert "no se pueden" in r.text.lower()
+    tenants_mod._key_lookup = None
+    tenants_mod._default_tenant = None
+
+
+def test_webhooks_lista_las_suscripciones_existentes(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_oura_webhooks(
+        monkeypatch,
+        {"GET": (200, [{"id": "sub-1", "callback_url": "https://x/webhooks/oura",
+                        "event_type": "update", "data_type": "daily_sleep"}])},
+    )
+    _login(cliente)
+
+    r = cliente.get("/admin/webhooks")
+
+    assert r.status_code == 200
+    assert "sub-1" in r.text
+
+
+def test_crear_webhook_llama_a_la_api_con_los_datos_del_form(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llamadas = _mock_oura_webhooks(monkeypatch, {"POST": (200, {"id": "nuevo"})})
+    _login(cliente)
+    # CSRF depende solo de la sesion (no de la ruta): se pide en /admin/tenants
+    # para no contaminar `llamadas` con el GET que /admin/webhooks hace a Oura.
+    csrf = _csrf_de(cliente)
+
+    r = cliente.post(
+        "/admin/webhooks/crear",
+        data={"csrf": csrf, "callback_url": "https://oura.scaleflow.tech/webhooks/oura",
+              "verification_token": "tok", "event_type": "update", "data_type": "daily_sleep"},
+        follow_redirects=False,
+    )
+
+    assert r.status_code == 303
+    assert llamadas == ["POST"]
+
+
+def test_eliminar_webhook_sin_csrf_rechaza(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llamadas = _mock_oura_webhooks(monkeypatch, {"DELETE": (200, {})})
+    _login(cliente)
+
+    r = cliente.post("/admin/webhooks/eliminar", data={"subscription_id": "sub-1"})
+
+    assert r.status_code == 403
+    assert llamadas == []
+
+
+def test_error_de_la_api_de_oura_se_muestra_sin_reventar(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_oura_webhooks(monkeypatch, {"GET": (401, {"detail": "bad creds"})})
+    _login(cliente)
+
+    r = cliente.get("/admin/webhooks")
+
+    assert r.status_code == 200
+    assert "error" in r.text.lower()
