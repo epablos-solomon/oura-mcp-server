@@ -62,6 +62,15 @@ Requiere en `.env`: `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, `OURA_STATE_SECRET`,
 
 Pon `OURA_BEARER_TOKEN` en `.env`. ⚠️ Expira a los 30 días; no apto para producción.
 
+## Panel de administración
+
+`https://oura.scaleflow.tech/admin/login` — gestión de tenants/API keys,
+estado de conexión OAuth por persona, suscripciones de webhook y un panel de
+salud básico. Protegido por un password compartido (`ADMIN_PASSWORD` en
+`.env`); un solo admin, sin gestión de usuarios propia. Los cambios de
+`config/tenants.yaml` hechos desde el panel se recargan en caliente, sin
+reiniciar el contenedor.
+
 ## Herramientas MCP (cobertura completa de la API v2)
 
 **Resúmenes diarios:** `sleep_summary`, `readiness_summary`, `activity_summary`,
