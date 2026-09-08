@@ -132,7 +132,12 @@ def test_logout_borra_la_cookie_y_redirige_al_login(cliente: TestClient) -> None
 def test_login_sin_admin_password_configurado_falla_con_mensaje_claro(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = Settings(token_db_path=tmp_path / "t.sqlite3", oura_state_secret="secreto-de-test")
+    settings = Settings(
+        token_db_path=tmp_path / "t.sqlite3",
+        oura_state_secret="secreto-de-test",
+        admin_password=None,
+        _env_file=None,
+    )
     store = TokenStore(settings.token_db_path)
     mcp = create_mcp_server(settings, store)
     register_admin_routes(mcp, settings, store)
@@ -147,7 +152,12 @@ def test_login_sin_admin_password_configurado_falla_con_mensaje_claro(
 def test_login_sin_oura_state_secret_configurado_falla_con_mensaje_claro(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = Settings(token_db_path=tmp_path / "t.sqlite3", admin_password=ADMIN_PASSWORD)
+    settings = Settings(
+        token_db_path=tmp_path / "t.sqlite3",
+        admin_password=ADMIN_PASSWORD,
+        oura_state_secret=None,
+        _env_file=None,
+    )
     store = TokenStore(settings.token_db_path)
     mcp = create_mcp_server(settings, store)
     register_admin_routes(mcp, settings, store)
@@ -227,6 +237,17 @@ def test_get_tenants_lista_las_keys_enmascaradas(cliente: TestClient) -> None:
     assert "kike" in r.text
 
 
+def test_formulario_crear_key_esta_en_un_dialogo(cliente: TestClient) -> None:
+    _login(cliente)
+    r = cliente.get("/admin/tenants")
+    assert "Crear llave" in r.text
+    assert 'id="open-create-dialog"' in r.text
+    start = r.text.index('id="create-dialog"')
+    fragment = r.text[start : r.text.index("</dialog>", start)]
+    assert "/admin/tenants/create" in fragment
+    assert "Crear key nueva" in fragment
+
+
 def test_crear_key_la_reconoce_de_inmediato_sin_reiniciar(cliente: TestClient) -> None:
     _login(cliente)
     csrf = _csrf_de(cliente)
@@ -242,6 +263,37 @@ def test_crear_key_la_reconoce_de_inmediato_sin_reiniciar(cliente: TestClient) -
     key = re.search(r"sk-oura-amber-[0-9a-f]+", pagina.text).group(0)
 
     assert resolve_tenant(key) is not None
+    assert "<dialog" in pagina.text
+    assert "id=\"key-dialog\"" in pagina.text
+
+
+def test_copiar_key_existente_abre_el_dialogo_sin_meterla_en_el_listado(
+    cliente: TestClient,
+) -> None:
+    """La tabla no lleva la key en claro; Copiar la revela via token de un uso."""
+    _login(cliente)
+    listado = cliente.get("/admin/tenants")
+    assert "sk-oura-kike-existente" not in listado.text
+    assert "/admin/tenants/reveal" in listado.text
+
+    csrf = _csrf_de(cliente)
+    key_id = hashlib.sha256(b"sk-oura-kike-existente").hexdigest()[:12]
+    r = cliente.post(
+        "/admin/tenants/reveal",
+        data={"csrf": csrf, "key_id": key_id},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    pagina = cliente.get(r.headers["location"])
+    assert "sk-oura-kike-existente" in pagina.text
+    assert "<dialog" in pagina.text
+
+
+def test_revelar_key_sin_csrf_rechaza(cliente: TestClient) -> None:
+    _login(cliente)
+    key_id = hashlib.sha256(b"sk-oura-kike-existente").hexdigest()[:12]
+    r = cliente.post("/admin/tenants/reveal", data={"key_id": key_id})
+    assert r.status_code == 403
 
 
 def test_la_key_no_se_vuelve_a_mostrar_en_una_segunda_visita(cliente: TestClient) -> None:
@@ -484,6 +536,9 @@ def test_webhooks_sin_credenciales_configuradas_muestra_aviso(
         oura_state_secret="secreto-de-test",
         tenants_config_path=str(tmp_path / "tenants.yaml"),
         admin_password=ADMIN_PASSWORD,
+        oura_client_id=None,
+        oura_client_secret=None,
+        _env_file=None,
     )
     monkeypatch.setattr(tenants_mod, "get_settings", lambda: settings)
     tenants_mod.reload()
@@ -514,6 +569,42 @@ def test_webhooks_lista_las_suscripciones_existentes(
 
     assert r.status_code == 200
     assert "sub-1" in r.text
+
+
+def test_formulario_webhook_usa_selects_con_enums_de_oura(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_oura_webhooks(monkeypatch, {"GET": (200, [])})
+    _login(cliente)
+    r = cliente.get("/admin/webhooks")
+
+    assert 'id="open-webhook-dialog"' in r.text
+    assert '<select name="event_type"' in r.text
+    assert '<select name="data_type"' in r.text
+    assert 'value="create"' in r.text
+    assert 'value="update"' in r.text
+    assert 'value="delete"' in r.text
+    assert 'value="daily_sleep"' in r.text
+    assert 'value="vo2_max"' in r.text
+    assert 'value="enhanced_tag"' in r.text
+    assert 'name="event_type" value="update"' not in r.text
+
+
+def test_crear_webhook_con_tipo_inventado_rechaza(
+    cliente: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llamadas = _mock_oura_webhooks(monkeypatch, {"POST": (200, {"id": "nuevo"})})
+    _login(cliente)
+    csrf = _csrf_de(cliente)
+
+    r = cliente.post(
+        "/admin/webhooks/crear",
+        data={"csrf": csrf, "callback_url": "https://oura.scaleflow.tech/webhooks/oura",
+              "verification_token": "tok", "event_type": "upsert", "data_type": "daily_sleep"},
+    )
+
+    assert r.status_code == 400
+    assert llamadas == []
 
 
 def test_crear_webhook_llama_a_la_api_con_los_datos_del_form(

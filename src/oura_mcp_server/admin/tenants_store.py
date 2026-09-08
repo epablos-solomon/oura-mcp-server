@@ -104,6 +104,25 @@ def list_all(path: Path) -> list[KeyEntry]:
     return entradas
 
 
+def get_plaintext(path: Path, key_id: str) -> str | None:
+    """Devuelve la key completa para copiarla desde el panel.
+
+    La lista HTML sigue mostrando solo la version enmascarada: este lookup
+    existe para el dialogo de copia (crear o reabrir una key ya guardada).
+    """
+    data = _load_raw(path)
+    for tenant_data in data["tenants"].values():
+        if not isinstance(tenant_data, dict):
+            continue
+        for key_entry in tenant_data.get("api_keys") or []:
+            if not isinstance(key_entry, dict):
+                continue
+            key = key_entry.get("key")
+            if isinstance(key, str) and key and _key_id(key) == key_id:
+                return key
+    return None
+
+
 def create_key(path: Path, tenant_id: str, tenant_name: str, agent: str, user: str) -> str:
     """Crea una key nueva y la persiste. Devuelve la key completa (una sola vez)."""
     with _write_lock:

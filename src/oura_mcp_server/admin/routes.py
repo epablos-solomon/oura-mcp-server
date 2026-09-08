@@ -26,7 +26,14 @@ from oura_mcp_server.admin.auth import (
     is_valid_csrf_token,
 )
 from oura_mcp_server.admin.log_buffer import InMemoryLogHandler
-from oura_mcp_server.admin.templates import error_banner, page
+from oura_mcp_server.admin.templates import (
+    create_key_form_dialog,
+    create_webhook_form_dialog,
+    error_banner,
+    key_reveal_dialog,
+    page,
+)
+from oura_mcp_server.admin.webhook_options import is_known_data_type, is_known_event_type
 from oura_mcp_server.auth import tenants as tenants_mod
 from oura_mcp_server.auth.token_store import TokenStore
 from oura_mcp_server.client.oura import OuraClient
@@ -102,9 +109,14 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
     # nuevo, o un test nuevo) arranca con su propio rate limiter.
     login_rate_limiter = LoginRateLimiter()
 
-    # token de un solo uso -> key completa recien creada; se muestra una vez
+    # token de un solo uso -> key completa; se muestra en el dialogo una vez
     # y se descarta al leerla (nunca viaja la key real en la URL).
     pending_key_reveals: dict[str, str] = {}
+
+    def _redirect_reveal(key: str) -> RedirectResponse:
+        reveal_token = secrets.token_urlsafe(16)
+        pending_key_reveals[reveal_token] = key
+        return RedirectResponse(f"/admin/tenants?reveal={reveal_token}", status_code=303)
 
     # Un solo InMemoryLogHandler por servidor: si register_admin_routes se
     # vuelve a llamar (tests, o un reinicio del build), no queremos que se
@@ -186,6 +198,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
             return guard
 
         csrf = create_csrf_token(request.cookies[ADMIN_SESSION_COOKIE], _admin_secret(settings))
+        csrf_attr = escape(csrf, quote=True)
         reveal_token = request.query_params.get("reveal", "")
         key_nueva = pending_key_reveals.pop(reveal_token, "") if reveal_token else ""
 
@@ -197,47 +210,38 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
             f"<tr><td>{escape(e.tenant_id, quote=True)}</td>"
             f"<td>{escape(e.user, quote=True)}</td>"
             f"<td>{escape(e.agent, quote=True)}</td>"
-            f"<td><code>{escape(e.key_masked, quote=True)}</code></td>"
+            f"<td><div class='key-cell'><code>{escape(e.key_masked, quote=True)}</code>"
+            f"<form method='post' action='/admin/tenants/reveal'>"
+            f"<input type='hidden' name='csrf' value='{csrf_attr}'>"
+            f"<input type='hidden' name='key_id' value='{escape(e.key_id, quote=True)}'>"
+            f"<button type='submit' class='btn-quiet'>Copiar</button></form></div></td>"
             f"<td><form method='post' action='/admin/tenants/revoke' style='margin:0'>"
-            f"<input type='hidden' name='csrf' value='{escape(csrf, quote=True)}'>"
+            f"<input type='hidden' name='csrf' value='{csrf_attr}'>"
             f"<input type='hidden' name='key_id' value='{escape(e.key_id, quote=True)}'>"
             f"<button type='submit'>Revocar</button></form></td></tr>"
             for e in entradas
         )
-        aviso = ""
-        if key_nueva:
-            key_value = escape(key_nueva, quote=True)
-            aviso = (
-                '<div class="aviso"><b>Key creada — copiala ahora, no se vuelve a mostrar:</b>'
-                '<div class="key-copy">'
-                f'<input type="text" id="key-value" value="{key_value}" readonly>'
-                '<button type="button" id="copy-btn" '
-                "onclick=\"navigator.clipboard.writeText(document.getElementById('key-value').value)"
-                ".then(function(){var b=document.getElementById('copy-btn');b.textContent='¡Copiado!';"
-                "setTimeout(function(){b.textContent='Copiar';},1500);})\">Copiar</button>"
-                "</div></div>"
-            )
+        dialogo = key_reveal_dialog(escape(key_nueva, quote=True)) if key_nueva else ""
         body = f"""
-{aviso}
+{dialogo}
+{create_key_form_dialog(csrf_attr)}
 <div class="card">
 <table>
 <tr><th>Tenant</th><th>User</th><th>Agent</th><th>Key</th><th></th></tr>
 {filas}
 </table>
 </div>
-<div class="card">
-<h3>Crear key nueva</h3>
-<form method="post" action="/admin/tenants/create">
-  <input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">
-  <label>Tenant</label><input name="tenant_id" value="scaleflow" required>
-  <label>Tenant name</label><input name="tenant_name" value="Scaleflow Internal" required>
-  <label>User</label><input name="user" required>
-  <label>Agent</label><input name="agent" required>
-  <p><button type="submit">Crear</button></p>
-</form>
-</div>
 """
-        return _html(page("Tenants", body))
+        return _html(
+            page(
+                "Tenants",
+                body,
+                heading_actions=(
+                    '<button type="button" id="open-create-dialog" class="btn-primary">'
+                    "Crear llave</button>"
+                ),
+            )
+        )
 
     @mcp.custom_route("/admin/tenants/create", methods=["POST"])
     async def admin_tenants_create(request: Request) -> Response:
@@ -266,10 +270,27 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         except (yaml.YAMLError, OSError) as exc:
             return _error_yaml("Tenants", exc)
         tenants_mod.reload()
+        return _redirect_reveal(key)
 
-        reveal_token = secrets.token_urlsafe(16)
-        pending_key_reveals[reveal_token] = key
-        return RedirectResponse(f"/admin/tenants?reveal={reveal_token}", status_code=303)
+    @mcp.custom_route("/admin/tenants/reveal", methods=["POST"])
+    async def admin_tenants_reveal(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+
+        form = await request.form()
+        session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
+        if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
+            return _html(page("Tenants", error_banner("CSRF invalido.")), status_code=403)
+
+        key_id = str(form.get("key_id") or "")
+        try:
+            key = tenants_store.get_plaintext(Path(settings.tenants_config_path), key_id)
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Tenants", exc)
+        if not key:
+            return _html(page("Tenants", error_banner("Key no encontrada.")), status_code=404)
+        return _redirect_reveal(key)
 
     @mcp.custom_route("/admin/tenants/revoke", methods=["POST"])
     async def admin_tenants_revoke(request: Request) -> Response:
@@ -408,26 +429,26 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 
         callback_url = escape(f"https://{request.url.hostname}/webhooks/oura", quote=True)
         verification_token = escape(settings.oura_webhook_verification_token or "", quote=True)
+        csrf_attr = escape(csrf, quote=True)
         body = f"""
+{create_webhook_form_dialog(csrf_attr, callback_url, verification_token)}
 <div class="card">
 <table>
 <tr><th>ID</th><th>Callback</th><th>Event</th><th>Data</th><th>Expira</th><th></th></tr>
 {filas}
 </table>
 </div>
-<div class="card">
-<h3>Crear suscripcion</h3>
-<form method="post" action="/admin/webhooks/crear">
-  <input type="hidden" name="csrf" value="{escape(csrf, quote=True)}">
-  <label>Callback URL</label><input name="callback_url" value="{callback_url}" required>
-  <label>Verification token</label><input name="verification_token" value="{verification_token}" required>
-  <label>Event type</label><input name="event_type" value="update">
-  <label>Data type</label><input name="data_type" value="daily_sleep">
-  <p><button type="submit">Crear</button></p>
-</form>
-</div>
 """
-        return _html(page("Webhooks", body))
+        return _html(
+            page(
+                "Webhooks",
+                body,
+                heading_actions=(
+                    '<button type="button" id="open-webhook-dialog" class="btn-primary">'
+                    "Crear suscripción</button>"
+                ),
+            )
+        )
 
     @mcp.custom_route("/admin/webhooks/crear", methods=["POST"])
     async def admin_webhooks_crear(request: Request) -> Response:
@@ -439,13 +460,21 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
             return _html(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
 
+        event_type = str(form.get("event_type") or "")
+        data_type = str(form.get("data_type") or "")
+        if not is_known_event_type(event_type) or not is_known_data_type(data_type):
+            return _html(
+                page("Webhooks", error_banner("event_type o data_type no es un valor de Oura.")),
+                status_code=400,
+            )
+
         client = OuraClient(settings, "")
         try:
             await client.create_webhook(
                 callback_url=str(form.get("callback_url") or ""),
                 verification_token=str(form.get("verification_token") or ""),
-                event_type=str(form.get("event_type") or "update"),
-                data_type=str(form.get("data_type") or "daily_sleep"),
+                event_type=event_type,
+                data_type=data_type,
             )
         except httpx.HTTPStatusError as exc:
             return _html(

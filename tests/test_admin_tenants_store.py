@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from oura_mcp_server.admin.tenants_store import create_key, list_all, revoke_key
+from oura_mcp_server.admin.tenants_store import create_key, get_plaintext, list_all, revoke_key
 
 TENANTS_YAML = """
 default_tenant: scaleflow
@@ -74,6 +74,17 @@ def test_revoke_key_elimina_solo_la_indicada(tmp_path: Path) -> None:
 def test_revoke_key_inexistente_devuelve_false(tmp_path: Path) -> None:
     path = _escribir(tmp_path)
     assert revoke_key(path, "no-existe-1234") is False
+
+
+def test_get_plaintext_devuelve_la_key_completa(tmp_path: Path) -> None:
+    path = _escribir(tmp_path)
+    key_id = list_all(path)[0].key_id
+    assert get_plaintext(path, key_id) == "sk-oura-kike-existente"
+
+
+def test_get_plaintext_inexistente_devuelve_none(tmp_path: Path) -> None:
+    path = _escribir(tmp_path)
+    assert get_plaintext(path, "no-existe-1234") is None
 
 
 def test_list_all_sobre_archivo_inexistente_devuelve_vacio(tmp_path: Path) -> None:
