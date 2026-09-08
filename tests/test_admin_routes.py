@@ -257,6 +257,63 @@ def test_oauth_lista_usuarios_con_key_sin_conectar_y_conectados(cliente: TestCli
     assert "daily email" in r.text
 
 
+def test_oauth_marca_no_conectado_a_quien_tiene_key_pero_nunca_hizo_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce el criterio central de la tarea: personas con key sin
+    conectar deben listarse como "no conectado", separadas de quienes si
+    completaron el flujo OAuth. Usa un tenants.yaml propio con dos usuarios
+    (amber nunca hace `store.save`) para no depender de la fixture
+    compartida, que solo define a `kike`.
+    """
+    tenants_yaml = """
+default_tenant: scaleflow
+tenants:
+  scaleflow:
+    name: Scaleflow Internal
+    api_keys:
+      - key: sk-oura-kike-existente
+        agent: claude-code
+        user: kike
+      - key: sk-oura-amber-existente
+        agent: openclaw
+        user: amber
+"""
+    (tmp_path / "tenants.yaml").write_text(tenants_yaml)
+    settings = Settings(
+        token_db_path=tmp_path / "t.sqlite3",
+        oura_state_secret="secreto-de-test",
+        oura_client_id="cid",
+        oura_client_secret="csec",
+        tenants_config_path=str(tmp_path / "tenants.yaml"),
+        admin_password=ADMIN_PASSWORD,
+    )
+    monkeypatch.setattr(tenants_mod, "get_settings", lambda: settings)
+    tenants_mod.reload()
+
+    store = TokenStore(settings.token_db_path)
+    mcp = create_mcp_server(settings, store)
+    register_admin_routes(mcp, settings, store)
+    c = TestClient(mcp.http_app(), base_url="https://testserver")
+    c.store = store
+
+    c.store.save("kike", OAuthTokens(access_token="a", refresh_token="r"))
+    _login(c)
+
+    r = c.get("/admin/oauth")
+
+    assert r.status_code == 200
+    assert "amber" in r.text
+    assert "no conectado" in r.text
+    kike_row = re.search(r"<tr><td>kike</td>.*?</tr>", r.text)
+    assert kike_row, "no se encontro la fila de kike"
+    assert "no conectado" not in kike_row.group(0)
+    assert "conectado" in kike_row.group(0)
+
+    tenants_mod._key_lookup = None
+    tenants_mod._default_tenant = None
+
+
 def test_forzar_reconexion_borra_los_tokens_guardados(cliente: TestClient) -> None:
     cliente.store.save("kike", OAuthTokens(access_token="a", refresh_token="r"))
     _login(cliente)
