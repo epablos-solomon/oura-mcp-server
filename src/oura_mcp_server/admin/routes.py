@@ -12,6 +12,7 @@ from html import escape
 from pathlib import Path
 
 import httpx
+import yaml
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
@@ -44,6 +45,33 @@ _FORMULARIO_LOGIN = """
 </form>
 {error}
 """
+
+
+def _html(body: str, *, status_code: int = 200) -> HTMLResponse:
+    """Toda pagina de /admin va sin cachear.
+
+    Alguna (la que revela una key recien creada) trae secretos en claro y no
+    debe quedar en el cache de disco ni en el bfcache del navegador, donde
+    reaparecería despues de que el servidor ya descarto el token de un solo uso.
+    """
+    return HTMLResponse(body, status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
+def _error_yaml(titulo: str, exc: Exception) -> HTMLResponse:
+    """tenants.yaml roto o ilegible: el panel lo cuenta en la pagina.
+
+    Es justo la pagina a la que el admin entra a diagnosticar el problema, asi
+    que no puede ser un 500. El texto de la excepcion puede incluir trozos del
+    YAML, por eso se escapa antes de meterlo en el HTML.
+    """
+    return _html(
+        page(
+            titulo,
+            error_banner(
+                f"Error leyendo/escribiendo tenants.yaml: {escape(str(exc), quote=True)}"
+            ),
+        )
+    )
 
 
 def _admin_secret(settings: Settings) -> str:
@@ -94,22 +122,20 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 
         if request.method == "GET":
             body = _FORMULARIO_LOGIN.format(next=escape(next_path, quote=True), error="")
-            return HTMLResponse(
-                page("Entrar", body, show_nav=False), headers={"Cache-Control": "no-store"}
-            )
+            return _html(page("Entrar", body, show_nav=False))
 
         if not settings.admin_password:
-            return HTMLResponse(
+            return _html(
                 page("Entrar", error_banner("ADMIN_PASSWORD no esta configurado."), show_nav=False),
                 status_code=500,
             )
         if not settings.oura_state_secret:
-            return HTMLResponse(
+            return _html(
                 page("Entrar", error_banner("OURA_STATE_SECRET no esta configurado."), show_nav=False),
                 status_code=500,
             )
         if login_rate_limiter.bloqueado():
-            return HTMLResponse(
+            return _html(
                 page(
                     "Entrar",
                     error_banner("Demasiados intentos fallidos. Espera unos minutos."),
@@ -122,12 +148,17 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         password = str(form.get("password") or "")
         next_target = _safe_next_path(str(form.get("next") or "/admin/tenants"))
 
-        if not secrets.compare_digest(password, settings.admin_password):
+        # Se comparan bytes, no str: compare_digest sobre str exige ASCII puro y
+        # lanza TypeError con un password con acentos (o con un ADMIN_PASSWORD
+        # no-ASCII, que dejaria el panel inservible).
+        if not secrets.compare_digest(
+            password.encode("utf-8"), settings.admin_password.encode("utf-8")
+        ):
             login_rate_limiter.registrar_fallo()
             body = _FORMULARIO_LOGIN.format(
                 next=escape(next_target, quote=True), error=error_banner("Password incorrecta.")
             )
-            return HTMLResponse(page("Entrar", body, show_nav=False), status_code=401)
+            return _html(page("Entrar", body, show_nav=False), status_code=401)
 
         login_rate_limiter.registrar_exito()
         session_cookie = create_admin_session(_admin_secret(settings))
@@ -158,7 +189,10 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         reveal_token = request.query_params.get("reveal", "")
         key_nueva = pending_key_reveals.pop(reveal_token, "") if reveal_token else ""
 
-        entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        try:
+            entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Tenants", exc)
         filas = "".join(
             f"<tr><td>{escape(e.tenant_id, quote=True)}</td>"
             f"<td>{escape(e.user, quote=True)}</td>"
@@ -192,7 +226,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
   <button type="submit">Crear</button>
 </form>
 """
-        return HTMLResponse(page("Tenants", body))
+        return _html(page("Tenants", body))
 
     @mcp.custom_route("/admin/tenants/create", methods=["POST"])
     async def admin_tenants_create(request: Request) -> Response:
@@ -203,20 +237,23 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Tenants", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Tenants", error_banner("CSRF invalido.")), status_code=403)
 
         tenant_id = str(form.get("tenant_id") or "").strip()
         tenant_name = str(form.get("tenant_name") or tenant_id).strip()
         user = str(form.get("user") or "").strip()
         agent = str(form.get("agent") or "").strip()
         if not tenant_id or not user:
-            return HTMLResponse(
+            return _html(
                 page("Tenants", error_banner("Tenant y user son obligatorios.")), status_code=400
             )
 
-        key = tenants_store.create_key(
-            Path(settings.tenants_config_path), tenant_id, tenant_name, agent, user
-        )
+        try:
+            key = tenants_store.create_key(
+                Path(settings.tenants_config_path), tenant_id, tenant_name, agent, user
+            )
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Tenants", exc)
         tenants_mod.reload()
 
         reveal_token = secrets.token_urlsafe(16)
@@ -232,10 +269,13 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Tenants", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Tenants", error_banner("CSRF invalido.")), status_code=403)
 
         key_id = str(form.get("key_id") or "")
-        tenants_store.revoke_key(Path(settings.tenants_config_path), key_id)
+        try:
+            tenants_store.revoke_key(Path(settings.tenants_config_path), key_id)
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Tenants", exc)
         tenants_mod.reload()
         return RedirectResponse("/admin/tenants", status_code=303)
 
@@ -246,7 +286,10 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
             return guard
 
         csrf = create_csrf_token(request.cookies[ADMIN_SESSION_COOKIE], _admin_secret(settings))
-        entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        try:
+            entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Conexiones OAuth", exc)
         registros = {r.user_id: r for r in store.list_with_metadata()}
         usuarios = sorted({e.user for e in entradas if e.user} | set(registros.keys()))
 
@@ -283,7 +326,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 {"".join(filas)}
 </table>
 """
-        return HTMLResponse(page("Conexiones OAuth", body))
+        return _html(page("Conexiones OAuth", body))
 
     @mcp.custom_route("/admin/oauth/desconectar", methods=["POST"])
     async def admin_oauth_desconectar(request: Request) -> Response:
@@ -294,7 +337,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Conexiones OAuth", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Conexiones OAuth", error_banner("CSRF invalido.")), status_code=403)
 
         user_id = str(form.get("user_id") or "")
         if user_id:
@@ -314,14 +357,14 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
                 "OURA_CLIENT_ID / OURA_CLIENT_SECRET no configurados: no se pueden "
                 "gestionar webhooks."
             )
-            return HTMLResponse(page("Webhooks", body))
+            return _html(page("Webhooks", body))
 
         client = OuraClient(settings, "")
         try:
             suscripciones = await client.list_webhooks()
         except httpx.HTTPStatusError as exc:
             body = error_banner(f"Error al listar webhooks: {exc.response.status_code}")
-            return HTMLResponse(page("Webhooks", body))
+            return _html(page("Webhooks", body))
 
         def _fila_webhook(s: dict) -> str:
             wid = escape(str(s.get("id", "")), quote=True)
@@ -365,7 +408,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
   <button type="submit">Crear</button>
 </form>
 """
-        return HTMLResponse(page("Webhooks", body))
+        return _html(page("Webhooks", body))
 
     @mcp.custom_route("/admin/webhooks/crear", methods=["POST"])
     async def admin_webhooks_crear(request: Request) -> Response:
@@ -375,7 +418,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
 
         client = OuraClient(settings, "")
         try:
@@ -386,7 +429,7 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
                 data_type=str(form.get("data_type") or "daily_sleep"),
             )
         except httpx.HTTPStatusError as exc:
-            return HTMLResponse(
+            return _html(
                 page("Webhooks", error_banner(f"Error al crear: {exc.response.status_code}")),
                 status_code=502,
             )
@@ -400,13 +443,13 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
 
         client = OuraClient(settings, "")
         try:
             await client.renew_webhook(str(form.get("subscription_id") or ""))
         except httpx.HTTPStatusError as exc:
-            return HTMLResponse(
+            return _html(
                 page("Webhooks", error_banner(f"Error al renovar: {exc.response.status_code}")),
                 status_code=502,
             )
@@ -420,13 +463,13 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         form = await request.form()
         session_cookie = request.cookies.get(ADMIN_SESSION_COOKIE, "")
         if not is_valid_csrf_token(str(form.get("csrf") or ""), session_cookie, _admin_secret(settings)):
-            return HTMLResponse(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
+            return _html(page("Webhooks", error_banner("CSRF invalido.")), status_code=403)
 
         client = OuraClient(settings, "")
         try:
             await client.delete_webhook(str(form.get("subscription_id") or ""))
         except httpx.HTTPStatusError as exc:
-            return HTMLResponse(
+            return _html(
                 page("Webhooks", error_banner(f"Error al eliminar: {exc.response.status_code}")),
                 status_code=502,
             )
@@ -438,7 +481,10 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
         if guard is not None:
             return guard
 
-        entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        try:
+            entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        except (yaml.YAMLError, OSError) as exc:
+            return _error_yaml("Salud", exc)
         conectados = store.list_user_ids()
 
         campos = {
@@ -473,4 +519,4 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
 {filas_logs}
 </table>
 """
-        return HTMLResponse(page("Salud", body))
+        return _html(page("Salud", body))

@@ -95,6 +95,17 @@ def test_post_login_con_password_correcta_setea_cookie_y_redirige(cliente: TestC
     assert ADMIN_SESSION_COOKIE in r.cookies
 
 
+def test_post_login_con_password_no_ascii_rechaza_sin_reventar(cliente: TestClient) -> None:
+    """secrets.compare_digest sobre str exige ASCII: un password con acentos
+    daba TypeError (500) en vez de un rechazo normal."""
+    r = cliente.post(
+        "/admin/login", data={"password": "contraseñá-ñoño", "next": "/admin/tenants"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 401
+    assert ADMIN_SESSION_COOKIE not in r.cookies
+
+
 def test_post_login_con_password_incorrecta_rechaza(cliente: TestClient) -> None:
     r = cliente.post(
         "/admin/login", data={"password": "mala", "next": "/admin/tenants"},
@@ -177,6 +188,37 @@ def test_get_tenants_sin_sesion_redirige_al_login(cliente: TestClient) -> None:
     assert r.headers["location"].startswith("/admin/login")
 
 
+@pytest.mark.parametrize("cookie", ["not.valid.base64!!", "a.b", "sin-punto", "...."])
+def test_una_cookie_de_sesion_basura_redirige_al_login_y_no_revienta(
+    cliente: TestClient, cookie: str
+) -> None:
+    """El guard corre en cada /admin/*: cualquier visitante sin sesion puede
+    mandar una cookie malformada y eso debe acabar en el login, no en un 500.
+    (`a.b` es el caso que reventaba: base64 invalido dentro de verify_state.)"""
+    cliente.cookies.set(ADMIN_SESSION_COOKIE, cookie, domain="testserver")
+
+    r = cliente.get("/admin/tenants", follow_redirects=False)
+
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/admin/login")
+
+
+def test_un_state_de_oauth_no_sirve_como_cookie_de_admin(cliente: TestClient) -> None:
+    """/auth/login entrega `sign_state(user, OURA_STATE_SECRET)` a cualquiera
+    con una API key valida. Con una key creada con `user: admin` ese state seria
+    identico a una sesion de admin si ambos usos compartieran el mismo secreto.
+    """
+    from oura_mcp_server.auth.state import sign_state
+
+    state = sign_state("admin", cliente.settings.oura_state_secret)
+    cliente.cookies.set(ADMIN_SESSION_COOKIE, state, domain="testserver")
+
+    r = cliente.get("/admin/tenants", follow_redirects=False)
+
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/admin/login")
+
+
 def test_get_tenants_lista_las_keys_enmascaradas(cliente: TestClient) -> None:
     _login(cliente)
     r = cliente.get("/admin/tenants")
@@ -216,6 +258,80 @@ def test_la_key_no_se_vuelve_a_mostrar_en_una_segunda_visita(cliente: TestClient
     cliente.get(reveal_url)
     segunda = cliente.get(reveal_url)
     assert "sk-oura-amber-" not in segunda.text
+
+
+def test_la_pagina_que_revela_la_key_no_se_cachea(cliente: TestClient) -> None:
+    """La key en claro no debe quedar en el cache de disco ni en el bfcache:
+    reaparecería despues de que el servidor ya quemo el token de un solo uso."""
+    _login(cliente)
+    csrf = _csrf_de(cliente)
+    r = cliente.post(
+        "/admin/tenants/create",
+        data={"csrf": csrf, "tenant_id": "scaleflow", "tenant_name": "Scaleflow Internal",
+              "user": "amber", "agent": "openclaw"},
+        follow_redirects=False,
+    )
+    revelado = cliente.get(r.headers["location"])
+
+    assert "sk-oura-amber-" in revelado.text
+    assert revelado.headers["cache-control"] == "no-store"
+
+
+def test_todas_las_paginas_de_admin_van_sin_cachear(cliente: TestClient) -> None:
+    _login(cliente)
+    for ruta in ("/admin/login", "/admin/tenants", "/admin/oauth", "/admin/health"):
+        r = cliente.get(ruta)
+        assert r.status_code == 200, ruta
+        assert r.headers.get("cache-control") == "no-store", ruta
+
+
+def test_un_tenants_yaml_roto_muestra_el_error_en_la_pagina(
+    cliente: TestClient, tmp_path: Path
+) -> None:
+    """El YAML se edita a mano por SSH: si queda roto, el panel es justo donde
+    el admin va a mirar. Tiene que abrir con un banner, no con un 500."""
+    _login(cliente)
+    Path(cliente.settings.tenants_config_path).write_text("tenants: [roto, sin, cerrar\n  : : :\n")
+
+    for ruta in ("/admin/tenants", "/admin/oauth", "/admin/health"):
+        r = cliente.get(ruta)
+        assert r.status_code == 200, ruta
+        assert "tenants.yaml" in r.text, ruta
+        assert "error" in r.text.lower(), ruta
+
+
+def test_un_tenants_yaml_ilegible_muestra_el_error_en_la_pagina(cliente: TestClient) -> None:
+    _login(cliente)
+    path = Path(cliente.settings.tenants_config_path)
+    path.unlink()
+    path.mkdir()  # abrirlo como archivo da OSError
+
+    r = cliente.get("/admin/tenants")
+
+    assert r.status_code == 200
+    assert "tenants.yaml" in r.text
+
+
+def test_una_key_sin_campo_key_no_tumba_la_pagina_de_tenants(cliente: TestClient) -> None:
+    _login(cliente)
+    Path(cliente.settings.tenants_config_path).write_text("""
+default_tenant: scaleflow
+tenants:
+  scaleflow:
+    name: Scaleflow Internal
+    api_keys:
+      - agent: claude-code
+        user: sin-key
+      - key: sk-oura-kike-existente
+        agent: claude-code
+        user: kike
+""")
+
+    r = cliente.get("/admin/tenants")
+
+    assert r.status_code == 200
+    assert "kike" in r.text
+    assert "sin-key" not in r.text
 
 
 def test_crear_key_sin_csrf_rechaza(cliente: TestClient) -> None:
