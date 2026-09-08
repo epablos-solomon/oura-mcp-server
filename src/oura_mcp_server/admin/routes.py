@@ -24,6 +24,7 @@ from oura_mcp_server.admin.auth import (
     is_valid_admin_session,
     is_valid_csrf_token,
 )
+from oura_mcp_server.admin.log_buffer import InMemoryLogHandler
 from oura_mcp_server.admin.templates import error_banner, page
 from oura_mcp_server.auth import tenants as tenants_mod
 from oura_mcp_server.auth.token_store import TokenStore
@@ -76,6 +77,16 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
     # token de un solo uso -> key completa recien creada; se muestra una vez
     # y se descarta al leerla (nunca viaja la key real en la URL).
     pending_key_reveals: dict[str, str] = {}
+
+    # Un solo InMemoryLogHandler por servidor: si register_admin_routes se
+    # vuelve a llamar (tests, o un reinicio del build), no queremos que se
+    # acumulen handlers viejos en el logger compartido.
+    target_logger = logging.getLogger("oura_mcp_server")
+    for h in list(target_logger.handlers):
+        if isinstance(h, InMemoryLogHandler):
+            target_logger.removeHandler(h)
+    log_buffer = InMemoryLogHandler()
+    target_logger.addHandler(log_buffer)
 
     @mcp.custom_route("/admin/login", methods=["GET", "POST"])
     async def admin_login(request: Request) -> Response:
@@ -420,3 +431,46 @@ def register_admin_routes(mcp, settings: Settings, store: TokenStore) -> None:
                 status_code=502,
             )
         return RedirectResponse("/admin/webhooks", status_code=303)
+
+    @mcp.custom_route("/admin/health", methods=["GET"])
+    async def admin_health(request: Request) -> Response:
+        guard = _require_admin(request, settings)
+        if guard is not None:
+            return guard
+
+        entradas = tenants_store.list_all(Path(settings.tenants_config_path))
+        conectados = store.list_user_ids()
+
+        campos = {
+            "OURA_CLIENT_ID": bool(settings.oura_client_id),
+            "OURA_CLIENT_SECRET": bool(settings.oura_client_secret),
+            "OURA_STATE_SECRET": bool(settings.oura_state_secret),
+            "OURA_WEBHOOK_VERIFICATION_TOKEN": bool(settings.oura_webhook_verification_token),
+            "TENANTS_CONFIG_PATH": settings.tenants_config_path,
+        }
+        filas_config = "".join(
+            f"<tr><td>{escape(str(nombre), quote=True)}</td>"
+            f"<td>{escape(str(valor), quote=True)}</td></tr>"
+            for nombre, valor in campos.items()
+        )
+        filas_logs = "".join(
+            f"<tr><td>{escape(e.level, quote=True)}</td>"
+            f"<td>{escape(e.logger_name, quote=True)}</td>"
+            f"<td>{escape(e.message, quote=True)}</td>"
+            f"<td>{escape(e.created_at, quote=True)}</td></tr>"
+            for e in log_buffer.entries()
+        )
+
+        body = f"""
+<p>tenants/keys: {len(entradas)} · usuarios conectados: {len(conectados)}</p>
+<table>
+<tr><th>Config</th><th>Valor</th></tr>
+{filas_config}
+</table>
+<h3>Avisos recientes</h3>
+<table>
+<tr><th>Nivel</th><th>Logger</th><th>Mensaje</th><th>Cuando</th></tr>
+{filas_logs}
+</table>
+"""
+        return HTMLResponse(page("Salud", body))

@@ -442,3 +442,29 @@ def test_error_de_la_api_de_oura_se_muestra_sin_reventar(
 
     assert r.status_code == 200
     assert "error" in r.text.lower()
+
+
+# --- Panel de salud ---
+
+def test_health_sin_sesion_redirige_al_login(cliente: TestClient) -> None:
+    r = cliente.get("/admin/health", follow_redirects=False)
+    assert r.status_code == 302
+
+
+def test_health_muestra_config_y_conteos(cliente: TestClient) -> None:
+    _login(cliente)
+    r = cliente.get("/admin/health")
+    assert r.status_code == 200
+    assert "OURA_STATE_SECRET" in r.text
+    assert "tenants/keys: 1" in r.text
+
+
+def test_health_muestra_avisos_recientes_de_otros_modulos(cliente: TestClient) -> None:
+    import logging
+
+    _login(cliente)
+    logging.getLogger("oura_mcp_server.algo").warning("aviso de prueba 123")
+
+    r = cliente.get("/admin/health")
+
+    assert "aviso de prueba 123" in r.text
